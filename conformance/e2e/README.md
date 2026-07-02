@@ -44,12 +44,16 @@ E2E_RUN_ID=$(date +%s) uv run pytest tests/test_pyiceberg_fs.py -v
 | `test_pyiceberg_minio.py` | pyiceberg | `s3://` (MinIO) | same lifecycle against object storage |
 | `test_duckdb_read.py` | DuckDB iceberg extension | `file:///tmp` | read a pyiceberg-written, Meridian-committed table (REST `ATTACH` first, `iceberg_scan` fallback) |
 | `test_concurrent_writers.py` | pyiceberg x2 | `file:///tmp` | two catalog instances appending concurrently to one table |
+| `test_views.py` | pyiceberg + raw REST | `file:///tmp` | view lifecycle: create (two SQL dialects) / load / replace / rename / collision 409s via raw REST; `list_views`, `view_exists`, `drop_view` via pyiceberg (its RestCatalog implements only those three view operations as of 0.11.x — no `create_view`/`load_view` yet, hence the raw-requests half) |
 
 Every pyiceberg HTTP interaction is watched through a response hook: any
 5xx from the server fails the test that triggered it.
 
-Known, deliberately-noted gap: Meridian's `LoadTableResult.config` is
-always empty, so S3 credentials/endpoint are not vended to clients and the
-S3 tests configure `s3.*` properties client-side
-(`test_pyiceberg_minio.py::test_server_does_not_vend_storage_config`
-records this).
+Storage config: Meridian vends the warehouse's **non-secret** storage
+options (`s3.endpoint`, `s3.region`/`client.region`,
+`s3.path-style-access`) in `LoadTableResult.config` /
+`LoadViewResult.config`
+(`test_pyiceberg_minio.py::test_server_vends_non_secret_storage_config`
+verifies this). Credentials are never vended — the S3 tests still
+configure `s3.access-key-id`/`s3.secret-access-key` client-side, and the
+same test asserts the server never leaks them.

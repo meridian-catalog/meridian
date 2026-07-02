@@ -1,12 +1,13 @@
 """pyiceberg full lifecycle against Meridian with an s3:// (MinIO) warehouse.
 
-Identical scenario to test_pyiceberg_fs.py, on object storage. The s3.*
-client properties are configured client-side because Meridian's
-LoadTableResult `config` is always empty (verified and recorded by
-test_server_does_not_vend_storage_config below).
+Identical scenario to test_pyiceberg_fs.py, on object storage. The server
+now vends the warehouse's non-secret storage options (endpoint, region,
+path-style) in LoadTableResult `config` — verified by
+test_server_vends_non_secret_storage_config below. Credentials are still
+configured client-side: Meridian never vends credentials (that is the
+credential-vending milestone, not config passthrough).
 """
 
-import warnings
 from types import SimpleNamespace
 
 import boto3
@@ -91,10 +92,10 @@ def test_lifecycle(env, step):
     env.recorder.assert_clean()
 
 
-def test_server_does_not_vend_storage_config(env, run_id):
-    """Checks whether LoadTableResult.config passes the warehouse's
-    storage_options through to clients. If it does not, the suite still
-    passes (clients configured s3.* locally) but the gap is recorded."""
+def test_server_vends_non_secret_storage_config(env, run_id):
+    """LoadTableResult.config passes the warehouse's NON-SECRET storage
+    options through under Iceberg client property names — and never the
+    credentials the warehouse was registered with."""
     ns = f"cfgprobe_{run_id}"
     env.catalog.create_namespace(ns)
     env.catalog.create_table(f"{ns}.probe", schema=ICEBERG_SCHEMA)
@@ -105,12 +106,16 @@ def test_server_does_not_vend_storage_config(env, run_id):
     )
     assert resp.status_code == 200, f"load_table: {resp.status_code} {resp.text}"
     config = resp.json().get("config", {})
-    if not any(key.startswith("s3.") for key in config):
-        warnings.warn(
-            "GAP: LoadTableResult.config does not vend s3.* storage settings "
-            f"(got {config!r}); clients must configure s3 endpoint/credentials "
-            "themselves.",
-            stacklevel=1,
-        )
+    assert config.get("s3.endpoint") == MINIO_ENDPOINT, config
+    assert config.get("s3.path-style-access") == "true", config
+    assert config.get("s3.region") == "us-east-1", config
+    assert config.get("client.region") == "us-east-1", config
+
+    # Credentials must never appear anywhere in the response body.
+    assert MINIO_SECRET_KEY not in resp.text, "secret key leaked into /v1 response"
+    assert not any(
+        MINIO_ACCESS_KEY == value for value in config.values()
+    ), f"access key leaked into config: {config}"
+
     env.catalog.drop_table(f"{ns}.probe")
     env.recorder.assert_clean()

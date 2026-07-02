@@ -33,6 +33,13 @@ const IMPLEMENTED_ENDPOINTS: &[&str] = &[
     "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics",
     "POST /v1/{prefix}/tables/rename",
     "POST /v1/{prefix}/transactions/commit",
+    "GET /v1/{prefix}/namespaces/{namespace}/views",
+    "POST /v1/{prefix}/namespaces/{namespace}/views",
+    "GET /v1/{prefix}/namespaces/{namespace}/views/{view}",
+    "HEAD /v1/{prefix}/namespaces/{namespace}/views/{view}",
+    "POST /v1/{prefix}/namespaces/{namespace}/views/{view}",
+    "DELETE /v1/{prefix}/namespaces/{namespace}/views/{view}",
+    "POST /v1/{prefix}/views/rename",
 ];
 
 /// How long idempotency-key receipts are replayable, advertised to clients
@@ -76,6 +83,14 @@ pub async fn get_config(
     State(state): State<AppState>,
     Query(query): Query<ConfigQuery>,
 ) -> Result<Json<CatalogConfig>, ApiError> {
+    // Log-only reminder on the endpoint every client calls first; the
+    // response body stays exactly the spec's ConfigResponse shape.
+    if state.config.auth.mode == meridian_common::config::AuthMode::Disabled {
+        tracing::warn!(
+            "serving catalog config with authentication DISABLED; every caller is anonymous"
+        );
+    }
+
     let mut overrides = BTreeMap::new();
 
     if let Some(name) = query.warehouse.as_deref().filter(|w| !w.is_empty()) {

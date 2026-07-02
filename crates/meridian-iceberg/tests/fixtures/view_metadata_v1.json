@@ -1,0 +1,96 @@
+{
+  "view-uuid": "fa6506c3-7681-40c8-86dc-e36561f83385",
+  "format-version": 1,
+  "location": "s3://warehouse/analytics/event_agg",
+  "current-version-id": 2,
+  "properties": {
+    "comment": "Daily event counts",
+    "version.history.num-entries": "10"
+  },
+  "schemas": [
+    {
+      "type": "struct",
+      "schema-id": 1,
+      "fields": [
+        {
+          "id": 1,
+          "name": "event_count",
+          "required": false,
+          "type": "int",
+          "doc": "Count of events"
+        },
+        {
+          "id": 2,
+          "name": "event_date",
+          "required": false,
+          "type": "date"
+        }
+      ],
+      "x-meridian-test-schema-note": "planted unknown schema field"
+    }
+  ],
+  "versions": [
+    {
+      "version-id": 1,
+      "timestamp-ms": 1573518431292,
+      "schema-id": 1,
+      "default-catalog": "prod",
+      "default-namespace": ["analytics"],
+      "summary": {
+        "engine-name": "Spark",
+        "engine-version": "3.3.2"
+      },
+      "representations": [
+        {
+          "type": "sql",
+          "sql": "SELECT\n    COUNT(1), CAST(event_ts AS DATE)\nFROM events\nGROUP BY 2",
+          "dialect": "spark"
+        }
+      ]
+    },
+    {
+      "version-id": 2,
+      "timestamp-ms": 1573518981593,
+      "schema-id": 1,
+      "default-catalog": "prod",
+      "default-namespace": ["analytics"],
+      "summary": {
+        "engine-name": "Trino",
+        "engine-version": "423",
+        "operation": "replace"
+      },
+      "representations": [
+        {
+          "type": "sql",
+          "sql": "SELECT\n    COUNT(1), CAST(event_ts AS DATE)\nFROM prod.analytics.events\nGROUP BY 2",
+          "dialect": "spark",
+          "x-meridian-test-representation-note": "planted unknown representation field"
+        },
+        {
+          "type": "sql",
+          "sql": "SELECT\n    COUNT(*), CAST(event_ts AS DATE)\nFROM prod.analytics.events\nGROUP BY 2",
+          "dialect": "trino"
+        },
+        {
+          "type": "x-meridian-test-plan",
+          "plan": "opaque-payload-of-a-representation-type-this-model-does-not-know",
+          "compression": "none"
+        }
+      ],
+      "x-meridian-test-version-note": "planted unknown version field"
+    }
+  ],
+  "version-log": [
+    {
+      "timestamp-ms": 1573518431292,
+      "version-id": 1
+    },
+    {
+      "timestamp-ms": 1573518981593,
+      "version-id": 2
+    }
+  ],
+  "x-meridian-test-unknown-top-level": {
+    "purpose": "unknown-field preservation"
+  }
+}

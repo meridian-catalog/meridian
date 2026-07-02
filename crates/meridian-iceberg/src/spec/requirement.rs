@@ -71,7 +71,9 @@ pub enum TableRequirement {
 pub struct RequirementFailed(String);
 
 impl RequirementFailed {
-    fn new(message: impl Into<String>) -> Self {
+    /// Shared with the view requirement module: table and view requirement
+    /// failures carry the same client-facing contract.
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self(message.into())
     }
 }

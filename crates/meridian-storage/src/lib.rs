@@ -17,7 +17,9 @@
 //!   `PermissionDenied`, `Transient { retryable }`) the commit path can
 //!   branch on.
 //! - Metadata-file helpers — [`new_metadata_location`],
-//!   [`read_table_metadata`], [`write_table_metadata`] — fixing the Iceberg
+//!   [`read_table_metadata`], [`write_table_metadata`] and their view
+//!   counterparts [`new_view_metadata_location`], [`read_view_metadata`],
+//!   [`write_view_metadata`] — fixing the Iceberg
 //!   `metadata/NNNNN-<uuid>.metadata.json` convention and the
 //!   never-overwrite rule.
 //!
@@ -32,6 +34,9 @@ mod profile;
 mod storage;
 
 pub use error::{StorageError, StorageResult};
-pub use metadata::{new_metadata_location, read_table_metadata, write_table_metadata};
+pub use metadata::{
+    new_metadata_location, new_view_metadata_location, read_table_metadata, read_view_metadata,
+    write_table_metadata, write_view_metadata,
+};
 pub use profile::{RetryConfig, S3Options, StorageProfile, StorageScheme};
 pub use storage::{ObjectMeta, ObjectStream, Storage};

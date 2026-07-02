@@ -20,6 +20,7 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 use ulid::Ulid;
 
+mod auth;
 pub mod error;
 pub mod routes;
 
@@ -45,10 +46,17 @@ impl MakeRequestId for MakeUlidRequestId {
 }
 
 /// Builds the complete application router with the middleware stack applied.
+// One route table, one function: splitting the mounts apart would hide the
+// surface the config endpoint advertises.
+#[allow(clippy::too_many_lines)]
 pub fn build_router(state: AppState) -> Router {
     let server = &state.config.server;
     let request_timeout = Duration::from_secs(server.request_timeout_secs);
     let max_body_bytes = server.max_body_bytes;
+    // Authentication middleware state (JWKS caches, JIT-provisioning
+    // cache). Constructed once; logs the loud warning when auth is
+    // disabled and fails closed when OIDC setup is broken.
+    let auth_state = auth::AuthState::from_app_config(&state.config, state.pool.clone());
 
     // The Iceberg REST surface, mounted both at the spec path prefix
     // (/iceberg/v1) and at the bare /v1 alias many clients default to.
@@ -95,6 +103,18 @@ pub fn build_router(state: AppState) -> Router {
             post(routes::tables::rename_table),
         )
         .route(
+            "/{prefix}/namespaces/{namespace}/views",
+            get(routes::views::list_views).post(routes::views::create_view),
+        )
+        .route(
+            "/{prefix}/namespaces/{namespace}/views/{view}",
+            get(routes::views::load_view)
+                .head(routes::views::view_exists)
+                .post(routes::views::replace_view)
+                .delete(routes::views::drop_view),
+        )
+        .route("/{prefix}/views/rename", post(routes::views::rename_view))
+        .route(
             "/{prefix}/transactions/commit",
             post(routes::tables::commit_transaction),
         )
@@ -107,7 +127,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/readyz", get(routes::health::readyz))
         .nest("/iceberg/v1", iceberg.clone())
         .nest("/v1", iceberg)
-        // Management API v0 (pre-auth).
+        // Management API v0 (authenticated like everything else; RBAC
+        // enforcement per the routes::grants module docs).
         .route(
             "/api/v2/warehouses",
             get(routes::warehouses::list_warehouses).post(routes::warehouses::create_warehouse),
@@ -116,11 +137,43 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v2/warehouses/{name}",
             delete(routes::warehouses::delete_warehouse),
         )
+        .route(
+            "/api/v2/principals",
+            get(routes::principals::list_principals),
+        )
+        .route(
+            "/api/v2/roles",
+            get(routes::grants::list_roles).post(routes::grants::create_role),
+        )
+        .route("/api/v2/roles/{name}", delete(routes::grants::delete_role))
+        .route(
+            "/api/v2/roles/{name}/bindings",
+            post(routes::grants::create_role_binding),
+        )
+        .route(
+            "/api/v2/roles/{name}/bindings/{principal_id}",
+            delete(routes::grants::delete_role_binding),
+        )
+        .route(
+            "/api/v2/grants",
+            get(routes::grants::list_grants).post(routes::grants::create_grant),
+        )
+        .route("/api/v2/grants/{id}", delete(routes::grants::delete_grant))
+        .route("/api/v2/permissions", get(routes::grants::get_permissions))
         // Unmatched routes and wrong methods must still speak the IRC error
         // envelope — engines parse error bodies, not just status codes.
         .fallback(route_not_found)
         .method_not_allowed_fallback(method_not_allowed)
-        .with_state(state);
+        .with_state(state)
+        // Authentication wraps every route — fallbacks included, health
+        // probes exempt themselves inside the middleware — as the
+        // innermost layer, so token validation (including any on-demand
+        // JWKS refresh) counts against the request timeout and each
+        // handler sees a Principal in its request extensions.
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state,
+            auth::authenticate,
+        ));
 
     routes.layer(
         ServiceBuilder::new()

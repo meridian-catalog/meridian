@@ -12,10 +12,12 @@ axum = { workspace = true }
 chrono = { workspace = true }
 hex = { workspace = true }
 http = { workspace = true }
+jsonwebtoken = { workspace = true }
 meridian-common = { workspace = true }
 meridian-iceberg = { workspace = true }
 meridian-storage = { workspace = true }
 meridian-store = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }

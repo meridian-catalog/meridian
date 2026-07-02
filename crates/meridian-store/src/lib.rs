@@ -10,8 +10,11 @@ pub mod commit;
 pub mod namespace;
 pub mod outbox;
 pub mod pool;
+pub mod principal;
+pub mod rbac;
 pub mod table;
 pub mod tenancy;
+pub mod view;
 pub mod warehouse;
 
 pub use pool::{connect, health_check};

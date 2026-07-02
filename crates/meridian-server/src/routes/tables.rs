@@ -46,16 +46,23 @@
 //!   identifiers + body); same key + same fingerprint replays the recorded
 //!   receipt, same key + different fingerprint is a 422 (F9). Receipts are
 //!   retained for 24 h.
+//! - **Authorization** (full mapping in the `crate::routes::grants` module
+//!   docs): list `LIST_TABLES`, create/register `CREATE_TABLE`, load/exists
+//!   `READ`, commit `COMMIT` (`CREATE_TABLE` for the assert-create
+//!   finalization), drop `DROP`, metrics `WRITE`, rename `WRITE` on the
+//!   source plus `CREATE_TABLE` on the destination namespace. Grants on a
+//!   namespace or warehouse cover the tables they contain.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use axum::{Extension, Json};
 use chrono::Utc;
 use meridian_common::MeridianError;
+use meridian_common::principal::Principal;
 use meridian_iceberg::commit::{CommitBackend, CommitBackendError, CommitReceipt, PointerCas};
 use meridian_iceberg::spec::{
     MetadataBuildError, MetadataBuilder, PartitionSpec, Schema, SortOrder, TableMetadata,
@@ -65,6 +72,7 @@ use meridian_storage::{Storage, StorageError, new_metadata_location, read_table_
 use meridian_store::commit::{
     CommitTableOp, DerivedTableState, PostgresCommitBackend, ReceiptToRecord, SnapshotIndexRow,
 };
+use meridian_store::rbac::{Privilege, SecurableScope};
 use meridian_store::warehouse::WarehouseRecord;
 use meridian_store::{audit, namespace, table, tenancy};
 use serde::Deserialize;
@@ -73,7 +81,7 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::error::ApiError;
-use crate::routes::ANONYMOUS_PRINCIPAL;
+use crate::routes::grants::{namespace_scope_chain, require};
 use crate::routes::namespaces::{
     decode_namespace_param, next_page_token, resolve_pagination, resolve_warehouse,
 };
@@ -200,16 +208,19 @@ fn metadata_to_value(metadata: &TableMetadata) -> Result<Value, ApiError> {
         .map_err(|e| MeridianError::internal("metadata JSON round-trip failed", e).into())
 }
 
-/// The `LoadTableResult` body (`config` is always present, empty until
-/// table-scoped configuration exists).
+/// The `LoadTableResult` body. `config` carries the warehouse's non-secret
+/// storage options mapped to Iceberg client property names (see
+/// [`super::views::storage_client_config`] — shared with `LoadViewResult`;
+/// credentials are never forwarded, that is the M2 vending milestone).
 fn load_table_result(
+    warehouse: &WarehouseRecord,
     metadata_location: Option<&str>,
     metadata: &TableMetadata,
 ) -> Result<Value, ApiError> {
     Ok(json!({
         "metadata-location": metadata_location,
         "metadata": metadata_to_value(metadata)?,
-        "config": {},
+        "config": super::views::storage_client_config(warehouse),
     }))
 }
 
@@ -295,11 +306,11 @@ fn key_reuse_error(key: &str) -> ApiError {
     ))
 }
 
-fn commit_backend(state: &AppState) -> PostgresCommitBackend {
+fn commit_backend(state: &AppState, principal: &Principal) -> PostgresCommitBackend {
     PostgresCommitBackend::new(
         state.pool.clone(),
         tenancy::default_workspace_id(),
-        ANONYMOUS_PRINCIPAL,
+        principal.audit_string(),
     )
 }
 
@@ -478,10 +489,19 @@ fn parse_commit_request(value: &Value) -> Result<ParsedCommit, ApiError> {
 /// `GET /{prefix}/namespaces/{namespace}/tables` — list table identifiers.
 pub async fn list_tables(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((prefix, raw_namespace)): Path<(String, String)>,
     Query(query): Query<ListTablesQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let ctx = resolve_namespace(&state, &prefix, &raw_namespace).await?;
+    let chain = namespace_scope_chain(&state.pool, &ctx.warehouse.id, &ctx.levels).await?;
+    require(
+        &state.pool,
+        &principal,
+        Privilege::ListTables,
+        &SecurableScope::namespace(&ctx.warehouse.id, chain),
+    )
+    .await?;
     let pagination = resolve_pagination(query.page_token.as_deref(), query.page_size)?;
 
     let fetch_limit = pagination.limit.map(|l| l + 1);
@@ -633,6 +653,7 @@ async fn materialize_new_table(
     metadata: &TableMetadata,
     metadata_location: &str,
     origin: &str,
+    principal: &str,
     receipt: Option<&ReceiptToRecord>,
 ) -> Result<table::TableRecord, MaterializeError> {
     meridian_storage::write_table_metadata(storage.as_ref(), metadata_location, metadata)
@@ -653,7 +674,7 @@ async fn materialize_new_table(
             properties: &derived.properties,
             origin,
         },
-        ANONYMOUS_PRINCIPAL,
+        principal,
         receipt,
     )
     .await;
@@ -723,10 +744,19 @@ fn storage_to_api(error: &StorageError) -> ApiError {
 /// initialize a create transaction (`stage-create`).
 pub async fn create_table(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((prefix, raw_namespace)): Path<(String, String)>,
     Json(request): Json<CreateTableRequest>,
 ) -> Result<Response, ApiError> {
     let ctx = resolve_namespace(&state, &prefix, &raw_namespace).await?;
+    let chain = namespace_scope_chain(&state.pool, &ctx.warehouse.id, &ctx.levels).await?;
+    require(
+        &state.pool,
+        &principal,
+        Privilege::CreateTable,
+        &SecurableScope::namespace(&ctx.warehouse.id, chain),
+    )
+    .await?;
     validate_table_name(&request.name)?;
 
     if table::get(&state.pool, &ctx.namespace.id, &request.name)
@@ -745,7 +775,7 @@ pub async fn create_table(
         // Nothing durable happens here (see module docs): the metadata is
         // returned for the client to build on, and the create transaction
         // commits through the commit endpoint with assert-create.
-        let body = load_table_result(None, &metadata)?;
+        let body = load_table_result(&ctx.warehouse, None, &metadata)?;
         return Ok((StatusCode::OK, Json(body)).into_response());
     }
 
@@ -759,12 +789,13 @@ pub async fn create_table(
         &metadata,
         &location,
         "create",
+        &principal.audit_string(),
         None,
     )
     .await
     .map_err(|e| e.into_api(ApiError::already_exists))?;
 
-    let body = load_table_result(Some(&location), &metadata)?;
+    let body = load_table_result(&ctx.warehouse, Some(&location), &metadata)?;
     Ok(json_with_etag(
         StatusCode::OK,
         body,
@@ -796,11 +827,20 @@ async fn resolve_table(
 /// `GET /{prefix}/namespaces/{namespace}/tables/{table}` — load a table.
 pub async fn load_table(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((prefix, raw_namespace, name)): Path<(String, String, String)>,
     Query(query): Query<LoadTableQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let (warehouse, levels, record) = resolve_table(&state, &prefix, &raw_namespace, &name).await?;
+    let chain = namespace_scope_chain(&state.pool, &warehouse.id, &levels).await?;
+    require(
+        &state.pool,
+        &principal,
+        Privilege::Read,
+        &SecurableScope::table(&warehouse.id, chain, Some(&record.id)),
+    )
+    .await?;
     let refs_only = match query.snapshots.as_deref() {
         None | Some("all") => false,
         Some("refs") => true,
@@ -833,7 +873,7 @@ pub async fn load_table(
         retain_referenced_snapshots(&mut metadata);
     }
 
-    let body = load_table_result(Some(&metadata_location), &metadata)?;
+    let body = load_table_result(&warehouse, Some(&metadata_location), &metadata)?;
     Ok(json_with_etag(StatusCode::OK, body, &etag))
 }
 
@@ -867,20 +907,44 @@ fn current_metadata_unreadable(location: &str, error: &StorageError) -> ApiError
 /// `HEAD /{prefix}/namespaces/{namespace}/tables/{table}` — existence check.
 pub async fn table_exists(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((prefix, raw_namespace, name)): Path<(String, String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    resolve_table(&state, &prefix, &raw_namespace, &name).await?;
+    let (warehouse, levels, record) = resolve_table(&state, &prefix, &raw_namespace, &name).await?;
+    let chain = namespace_scope_chain(&state.pool, &warehouse.id, &levels).await?;
+    require(
+        &state.pool,
+        &principal,
+        Privilege::Read,
+        &SecurableScope::table(&warehouse.id, chain, Some(&record.id)),
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 /// `DELETE /{prefix}/namespaces/{namespace}/tables/{table}` — drop a table.
 pub async fn drop_table(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((prefix, raw_namespace, name)): Path<(String, String, String)>,
     Query(query): Query<DropTableQuery>,
 ) -> Result<StatusCode, ApiError> {
     let warehouse = resolve_warehouse(&state.pool, &prefix).await?;
     let levels = decode_namespace_param(&raw_namespace)?;
+    // The table id joins the scope when the table exists; a caller denied
+    // here learns nothing about existence, and the store still 404s a
+    // missing table for authorized callers.
+    let table_id = table::get_by_name(&state.pool, &warehouse.id, &levels, &name)
+        .await?
+        .map(|r| r.id);
+    let chain = namespace_scope_chain(&state.pool, &warehouse.id, &levels).await?;
+    require(
+        &state.pool,
+        &principal,
+        Privilege::Drop,
+        &SecurableScope::table(&warehouse.id, chain, table_id.as_deref()),
+    )
+    .await?;
 
     let record = table::drop_table(
         &state.pool,
@@ -889,7 +953,7 @@ pub async fn drop_table(
         &levels,
         &name,
         query.purge_requested,
-        ANONYMOUS_PRINCIPAL,
+        &principal.audit_string(),
     )
     .await
     .map_err(|e| match e {
@@ -923,6 +987,7 @@ pub async fn drop_table(
 /// warehouse.
 pub async fn rename_table(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path(prefix): Path<String>,
     Json(request): Json<RenameTableRequest>,
 ) -> Result<StatusCode, ApiError> {
@@ -934,6 +999,34 @@ pub async fn rename_table(
         ));
     }
 
+    // WRITE on the source table, CREATE_TABLE where it lands.
+    let source_id = table::get_by_name(
+        &state.pool,
+        &warehouse.id,
+        &request.source.namespace,
+        &request.source.name,
+    )
+    .await?
+    .map(|r| r.id);
+    let source_chain =
+        namespace_scope_chain(&state.pool, &warehouse.id, &request.source.namespace).await?;
+    require(
+        &state.pool,
+        &principal,
+        Privilege::Write,
+        &SecurableScope::table(&warehouse.id, source_chain, source_id.as_deref()),
+    )
+    .await?;
+    let dest_chain =
+        namespace_scope_chain(&state.pool, &warehouse.id, &request.destination.namespace).await?;
+    require(
+        &state.pool,
+        &principal,
+        Privilege::CreateTable,
+        &SecurableScope::namespace(&warehouse.id, dest_chain),
+    )
+    .await?;
+
     table::rename(
         &state.pool,
         tenancy::default_workspace_id(),
@@ -942,7 +1035,7 @@ pub async fn rename_table(
         &request.source.name,
         &request.destination.namespace,
         &request.destination.name,
-        ANONYMOUS_PRINCIPAL,
+        &principal.audit_string(),
     )
     .await
     .map_err(|e| match e {
@@ -965,10 +1058,19 @@ pub async fn rename_table(
 /// metadata file as a catalog table.
 pub async fn register_table(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((prefix, raw_namespace)): Path<(String, String)>,
     Json(request): Json<RegisterTableRequest>,
 ) -> Result<Response, ApiError> {
     let ctx = resolve_namespace(&state, &prefix, &raw_namespace).await?;
+    let chain = namespace_scope_chain(&state.pool, &ctx.warehouse.id, &ctx.levels).await?;
+    require(
+        &state.pool,
+        &principal,
+        Privilege::CreateTable,
+        &SecurableScope::namespace(&ctx.warehouse.id, chain),
+    )
+    .await?;
     validate_table_name(&request.name)?;
     if request.overwrite {
         // TODO(M1+): registerTable overwrite (pointer adoption over an
@@ -1010,7 +1112,7 @@ pub async fn register_table(
             properties: &derived.properties,
             origin: "register",
         },
-        ANONYMOUS_PRINCIPAL,
+        &principal.audit_string(),
         None,
     )
     .await
@@ -1020,7 +1122,7 @@ pub async fn register_table(
         other => ApiError::from(other),
     })?;
 
-    let body = load_table_result(Some(&request.metadata_location), &metadata)?;
+    let body = load_table_result(&ctx.warehouse, Some(&request.metadata_location), &metadata)?;
     Ok(json_with_etag(
         StatusCode::OK,
         body,
@@ -1036,10 +1138,19 @@ pub async fn register_table(
 /// The raw payload is stored verbatim for the observability pillar.
 pub async fn report_metrics(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((prefix, raw_namespace, name)): Path<(String, String, String)>,
     Json(report): Json<Value>,
 ) -> Result<StatusCode, ApiError> {
-    let (_, levels, record) = resolve_table(&state, &prefix, &raw_namespace, &name).await?;
+    let (warehouse, levels, record) = resolve_table(&state, &prefix, &raw_namespace, &name).await?;
+    let chain = namespace_scope_chain(&state.pool, &warehouse.id, &levels).await?;
+    require(
+        &state.pool,
+        &principal,
+        Privilege::Write,
+        &SecurableScope::table(&warehouse.id, chain, Some(&record.id)),
+    )
+    .await?;
     if !report.is_object() {
         return Err(ApiError::bad_request(
             "metrics report must be a JSON object",
@@ -1068,6 +1179,7 @@ pub async fn report_metrics(
 /// to one table (`CommitTableRequest` → `CommitTableResponse`).
 pub async fn commit_table(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((prefix, raw_namespace, name)): Path<(String, String, String)>,
     headers: HeaderMap,
     Json(body): Json<Value>,
@@ -1091,8 +1203,34 @@ pub async fn commit_table(
         &prefix,
         &json!({ "namespace": levels, "name": name, "request": body }),
     );
-    let backend = commit_backend(&state);
+    let backend = commit_backend(&state, &principal);
     let storage = connect_storage(&warehouse)?;
+
+    // Authorize before the idempotency recall so an unauthorized caller
+    // can never replay a recorded receipt: COMMIT on an existing table,
+    // CREATE_TABLE on the namespace when the commit would create one.
+    let record = table::get_by_name(&state.pool, &warehouse.id, &levels, &name).await?;
+    let chain = namespace_scope_chain(&state.pool, &warehouse.id, &levels).await?;
+    match &record {
+        Some(existing) => {
+            require(
+                &state.pool,
+                &principal,
+                Privilege::Commit,
+                &SecurableScope::table(&warehouse.id, chain, Some(&existing.id)),
+            )
+            .await?;
+        }
+        None => {
+            require(
+                &state.pool,
+                &principal,
+                Privilege::CreateTable,
+                &SecurableScope::namespace(&warehouse.id, chain),
+            )
+            .await?;
+        }
+    }
 
     // Idempotency recall (§3 step 2): replay before touching any state.
     if let Some(key) = &key
@@ -1101,7 +1239,6 @@ pub async fn commit_table(
         return Ok(response);
     }
 
-    let record = table::get_by_name(&state.pool, &warehouse.id, &levels, &name).await?;
     let idem = key.as_deref().map(|k| (k, fingerprint.as_str()));
 
     match record {
@@ -1123,6 +1260,7 @@ pub async fn commit_table(
                     &parsed,
                     key.as_deref(),
                     &fingerprint,
+                    &principal.audit_string(),
                 )
                 .await
             } else {
@@ -1329,6 +1467,7 @@ async fn commit_existing_table(
 /// against an empty base. The row insert (with its audit row, outbox event,
 /// and receipt) is the atomic publication point; a concurrent create makes
 /// the insert conflict, which is exactly a failed `assert-create` (409).
+#[allow(clippy::too_many_arguments)] // single call site; mirrors materialize_new_table
 async fn commit_create_table(
     state: &AppState,
     storage: &Arc<dyn Storage>,
@@ -1337,6 +1476,7 @@ async fn commit_create_table(
     parsed: &ParsedCommit,
     key: Option<&str>,
     fingerprint: &str,
+    principal: &str,
 ) -> Result<Response, ApiError> {
     let mut violations = Vec::new();
     check_requirements(&parsed.requirements, None, name, &mut violations);
@@ -1394,6 +1534,7 @@ async fn commit_create_table(
         &metadata,
         &metadata_location,
         "commit-create",
+        principal,
         receipt.as_ref(),
     )
     .await
@@ -1449,6 +1590,7 @@ fn backend_to_api(error: CommitBackendError) -> ApiError {
 #[allow(clippy::too_many_lines)]
 pub async fn commit_transaction(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path(prefix): Path<String>,
     headers: HeaderMap,
     Json(body): Json<Value>,
@@ -1513,9 +1655,24 @@ pub async fn commit_transaction(
         records.push(record);
     }
 
+    // COMMIT on every table, before the idempotency recall (an
+    // unauthorized caller must not learn a receipt exists) and before any
+    // staging I/O.
+    for (identifier, record) in changes.iter().map(|(i, _)| i).zip(&records) {
+        let chain =
+            namespace_scope_chain(&state.pool, &warehouse.id, &identifier.namespace).await?;
+        require(
+            &state.pool,
+            &principal,
+            Privilege::Commit,
+            &SecurableScope::table(&warehouse.id, chain, Some(&record.id)),
+        )
+        .await?;
+    }
+
     let key = idempotency_key(&headers)?;
     let fingerprint = request_fingerprint("commit-transaction", &prefix, &body);
-    let backend = commit_backend(&state);
+    let backend = commit_backend(&state, &principal);
     let storage = connect_storage(&warehouse)?;
 
     if let Some(key) = &key {
