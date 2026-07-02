@@ -25,6 +25,7 @@ The catalog is the one component every engine already talks to. Meridian's premi
 > Meridian is **not yet usable**. It is under active initial development:
 >
 > - The core Iceberg REST catalog surface exists: config, namespaces, and the table lifecycle (create, load with ETags, list, rename, register, drop) including the transactional commit path (single-table commits and multi-table transactions, with idempotency keys). Views, auth, credential vending, and background maintenance do not exist yet
+> - [docs/api-status.md](docs/api-status.md) is the source of truth for what works: every REST endpoint's status (implemented / partial / not yet) and the documented divergences from the spec
 > - APIs, schemas, and configuration formats are unstable and will change without notice
 > - There are no releases and no compatibility guarantees
 > - **Do not run this in production** (or anywhere near data you care about)

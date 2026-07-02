@@ -23,10 +23,10 @@ curl -s localhost:8181/healthz
 # {"status":"ok","checks":{"database":"ok"}}
 
 curl -s localhost:8181/v1/config
-# {"defaults":{},"overrides":{}}
+# {"defaults":{},"overrides":{},"endpoints":[...],"idempotency-key-lifetime":"PT24H"}
 
-curl -s localhost:8181/iceberg/v1/config
-# {"defaults":{},"overrides":{}}
+curl -s "localhost:8181/iceberg/v1/config?warehouse=<name>"
+# {"defaults":{},"overrides":{"prefix":"<name>"},"endpoints":[...],"idempotency-key-lifetime":"PT24H"}
 ```
 
 ## Running from source
