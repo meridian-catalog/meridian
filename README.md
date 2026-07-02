@@ -1,8 +1,10 @@
 # Meridian
 
+**The agentic Iceberg REST Catalog** — an open-source, Apache Iceberg-native catalog with operations built in.
+
 > **Note on the name:** "Meridian" is a working name and may change before the first public release.
 
-Meridian is an open-source, [Apache Iceberg](https://iceberg.apache.org/)-native data catalog. It implements the Iceberg REST Catalog (IRC) specification as a drop-in catalog for any IRC-compatible engine, and builds the operational layers that usually live *around* a catalog directly *into* it:
+Meridian implements the [Apache Iceberg](https://iceberg.apache.org/) REST Catalog (IRC) specification as a drop-in catalog for any IRC-compatible engine, and builds the operational layers that usually live *around* a catalog directly *into* it:
 
 - **Autonomous table maintenance** — compaction, snapshot expiration, orphan-file cleanup, driven by the catalog itself
 - **Cross-engine access governance** — one policy layer enforced consistently regardless of which engine reads the table
@@ -22,6 +24,7 @@ The catalog is the one component every engine already talks to. Meridian's premi
 >
 > Meridian is **not yet usable**. It is under active initial development:
 >
+> - M0 (foundation) is in progress: the Cargo workspace, the PostgreSQL storage layer, and the IRC `/v1/config` endpoint exist; the rest of the catalog protocol does not yet
 > - APIs, schemas, and configuration formats are unstable and will change without notice
 > - There are no releases and no compatibility guarantees
 > - **Do not run this in production** (or anywhere near data you care about)
@@ -48,6 +51,10 @@ Rough order of development:
 6. Governed MCP gateway for agents
 
 Details will move into GitHub issues and milestones as the project opens up.
+
+## Development
+
+To build and run Meridian locally (Rust toolchain, Dockerized Postgres, tests, lints), see [docs/dev.md](docs/dev.md). Project conventions — commit style, ADRs, code standards — are in [CONTRIBUTING.md](CONTRIBUTING.md). Significant design decisions are recorded in [docs/adr/](docs/adr/).
 
 ## Contributing
 
