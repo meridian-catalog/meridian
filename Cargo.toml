@@ -4,6 +4,7 @@ members = [
     "crates/meridian-common",
     "crates/meridian-store",
     "crates/meridian-iceberg",
+    "crates/meridian-storage",
     "crates/meridian-server",
     "crates/meridian-cli",
 ]
@@ -63,6 +64,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # CLI & config
 clap = { version = "4.5", features = ["derive"] }
 figment = { version = "0.10", features = ["toml", "env"] }
+
+# HTTP client (CLI -> server; rustls so no system OpenSSL is required)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Hashing
 sha2 = "0.10"
