@@ -12,6 +12,11 @@ released spec version: scan planning, functions, `unregister`,
 `register-view`). Every operation was checked against the running server when
 this page was written; the page is updated whenever the surface changes.
 
+Beyond endpoint-level checks, the surface is exercised by real clients:
+the [e2e suite](../conformance/e2e/) (pyiceberg, DuckDB) and per-engine
+smoke tests (Flink) — see the
+[engine conformance matrix](../conformance/engines/README.md).
+
 > [!WARNING]
 > **AUTHENTICATION — AND WITH IT AUTHORIZATION — IS OFF BY DEFAULT.**
 > With the default `auth.mode = "disabled"`, every endpoint — including the
@@ -68,9 +73,9 @@ piece is missing · **Not yet** — returns 404/405.
 | Operation | Endpoint | Status | Notes |
 |---|---|---|---|
 | `listTables` | `GET .../namespaces/{ns}/tables` | Implemented | Pagination: see divergence (a). |
-| `createTable` | `POST .../namespaces/{ns}/tables` | Implemented | `stage-create` supported (metadata returned, nothing persisted until the create transaction commits with `assert-create`). `format-version` property selects format 1–3 (default 2). No credential vending: the `X-Iceberg-Access-Delegation` header is ignored; `config` carries the warehouse's non-secret storage options only (see [Storage config passthrough](#storage-config-passthrough)). Partition-spec numbering: see divergence (d). Name collisions with views: see divergence (g). |
+| `createTable` | `POST .../namespaces/{ns}/tables` | Partial | `stage-create` supported (metadata returned, nothing persisted until the create transaction commits with `assert-create`). `format-version` property selects format 1–3 (default 2). No credential vending: the `X-Iceberg-Access-Delegation` header is ignored; `config` carries the warehouse's non-secret storage options only (see [Storage config passthrough](#storage-config-passthrough)). Partition-spec numbering: see divergence (d). Name collisions with views: see divergence (g). **Missing:** incoming schema field ids are validated as-is instead of being treated as provisional and reassigned server-side (the Java reference runs `AssignFreshIds`); Flink's connector sends 0-based provisional ids, so Flink `CREATE TABLE` is rejected with 400 `field id 0 is not positive`. Found by the [Flink smoke](../conformance/engines/flink/README.md#known-issues), which documents a workaround. |
 | `loadTable` | `GET .../tables/{table}` | Implemented | `snapshots=all\|refs`; strong `ETag` and `If-None-Match` → 304 (see [ETags](#etags)). No credential vending; `config` carries non-secret storage options only (see [Storage config passthrough](#storage-config-passthrough)). |
-| `updateTable` (commit) | `POST .../tables/{table}` | Implemented | The single-table commit path: requirements checked against the current metadata, unknown update/requirement types → 400 (as the spec requires), bounded compare-and-swap retry (409 `CommitFailedException` after 3 lost races), `assert-create` finalizes a stage-create transaction. `Idempotency-Key` honored (see [Idempotency keys](#idempotency-keys)). |
+| `updateTable` (commit) | `POST .../tables/{table}` | Implemented | The single-table commit path: requirements checked against the current metadata, unknown update/requirement types → 400 (as the spec requires), bounded compare-and-swap retry (409 `CommitFailedException` after 3 lost races), `assert-create` finalizes a stage-create transaction. `Idempotency-Key` honored (see [Idempotency keys](#idempotency-keys)). Exercised end-to-end by pyiceberg (appends, schema evolution, two concurrent writers) and by Flink's checkpoint-driven streaming commits — see the [engine matrix](../conformance/engines/README.md). |
 | `dropTable` | `DELETE .../tables/{table}` | Implemented | `purgeRequested=true` semantics: see divergence (e). |
 | `tableExists` | `HEAD .../tables/{table}` | Implemented | 204 / 404. |
 | `registerTable` | `POST .../namespaces/{ns}/register` | Partial | Adopts an existing metadata file as-is (it must parse and live under the warehouse root). **Missing:** `overwrite: true` is rejected with 400. Adopting a UUID that belongs to a live table is rejected: see divergence (c). |

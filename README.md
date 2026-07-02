@@ -24,8 +24,10 @@ The catalog is the one component every engine already talks to. Meridian's premi
 >
 > Meridian is **not yet usable**. It is under active initial development:
 >
-> - The core Iceberg REST catalog surface exists: config, namespaces, and the table lifecycle (create, load with ETags, list, rename, register, drop) including the transactional commit path (single-table commits and multi-table transactions, with idempotency keys). Views, auth, credential vending, and background maintenance do not exist yet
+> - The core Iceberg REST catalog surface exists: config, namespaces, the table lifecycle (create, load with ETags, list, rename, register, drop) including the transactional commit path (single-table commits and multi-table transactions, with idempotency keys), the view lifecycle, OIDC authentication, and deny-by-default RBAC (auth is **off by default**). Credential vending and background maintenance do not exist yet
 > - [docs/api-status.md](docs/api-status.md) is the source of truth for what works: every REST endpoint's status (implemented / partial / not yet) and the documented divergences from the spec
+> - Real clients run against it: pyiceberg and DuckDB pass the [e2e suite](conformance/e2e/), and a Flink 1.20 smoke passes except a documented `CREATE TABLE` bug — see the [engine conformance matrix](conformance/engines/README.md) for honest per-engine status (Spark and Trino not yet run)
+> - First catalog-plane latency numbers against Apache Polaris and Lakekeeper are in [docs/benchmarks/](docs/benchmarks/) — local development benchmarks on a laptop, not cloud or production performance claims
 > - APIs, schemas, and configuration formats are unstable and will change without notice
 > - There are no releases and no compatibility guarantees
 > - **Do not run this in production** (or anywhere near data you care about)

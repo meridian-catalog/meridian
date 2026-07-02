@@ -12,6 +12,23 @@ releases begin, the project will adhere to
 
 ### Added
 
+- **Engine conformance matrix and Flink smoke test**
+  ([conformance/engines/](conformance/engines/README.md)): pyiceberg
+  0.11.1 and DuckDB 1.5.4 pass the e2e suite (full table lifecycle,
+  concurrent writers, views, S3/MinIO storage-config vending); Flink 1.20
+  passes batch inserts, checkpoint-driven streaming commits, and
+  read-back, and exposed a real `createTable` bug — Meridian rejects the
+  connector's 0-based provisional field ids instead of assigning fresh
+  ids server-side (documented with a workaround in
+  [docs/api-status.md](docs/api-status.md) and the Flink README; Spark
+  and Trino runs are still pending).
+- **Catalog benchmark harness (`meridian-bench`)** under
+  [testing/bench/](testing/bench/README.md) — catalog-plane HTTP latency
+  scenarios (`get-config`, `load-table` concurrency sweep, `commit`)
+  with HDR-histogram stats, plus scripts that boot Apache Polaris and
+  Lakekeeper against the same local infra. First published local-dev
+  results (Meridian vs Polaris 1.5.0 vs Lakekeeper v0.13.1, with
+  caveats): [docs/benchmarks/](docs/benchmarks/README.md).
 - **RBAC enforcement on the view surface and principal listing**: views
   are now a first-class grant securable (`securable_type = "view"`, with
   the same hierarchy inheritance as tables), and every view endpoint
