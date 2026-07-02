@@ -33,6 +33,141 @@ pub struct AppConfig {
     pub database: DatabaseConfig,
     /// Logging/tracing settings.
     pub telemetry: TelemetryConfig,
+    /// Authentication settings.
+    pub auth: AuthConfig,
+}
+
+/// Authentication mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMode {
+    /// No authentication: every request runs as the anonymous principal.
+    /// The server logs a loud warning at startup — never run this exposed
+    /// to an untrusted network.
+    #[default]
+    Disabled,
+    /// OIDC bearer tokens from configured external identity providers.
+    /// Meridian validates tokens; it never issues its own.
+    Oidc,
+}
+
+/// Authentication settings (`[auth]`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AuthConfig {
+    /// Authentication mode: `"disabled"` (default) or `"oidc"`.
+    pub mode: AuthMode,
+    /// OIDC settings; only consulted when `mode = "oidc"`.
+    pub oidc: OidcConfig,
+    /// Identity granted the built-in `admin` role at startup (idempotent).
+    /// This is how the first administrator gets access in `oidc` mode,
+    /// where authorization is deny-by-default.
+    pub bootstrap_admin: Option<BootstrapAdminConfig>,
+}
+
+/// The startup bootstrap identity (`[auth.bootstrap_admin]`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapAdminConfig {
+    /// Token issuer URL of the bootstrap identity (matched against the
+    /// `iss` claim exactly, like `[[auth.oidc.issuers]].issuer_url`).
+    pub issuer: String,
+    /// OIDC `sub` claim of the bootstrap identity.
+    pub subject: String,
+}
+
+/// OIDC validation settings (`[auth.oidc]`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct OidcConfig {
+    /// Trusted token issuers. At least one is required when `mode = "oidc"`.
+    pub issuers: Vec<OidcIssuerConfig>,
+    /// Accepted clock skew, in seconds, when validating `exp`/`nbf`.
+    pub clock_skew_secs: u64,
+    /// Require `https://` issuer URLs. May be disabled for tests against a
+    /// local issuer; doing so logs a warning at startup.
+    pub require_https_issuers: bool,
+    /// Optional claim name that marks a token as a workload/service
+    /// credential (in addition to the built-in heuristics: a
+    /// `gty = "client-credentials"` claim, or the absence of both `email`
+    /// and `preferred_username`).
+    pub service_claim: Option<String>,
+}
+
+impl Default for OidcConfig {
+    fn default() -> Self {
+        Self {
+            issuers: Vec::new(),
+            clock_skew_secs: 60,
+            require_https_issuers: true,
+            service_claim: None,
+        }
+    }
+}
+
+/// One trusted OIDC issuer (`[[auth.oidc.issuers]]`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OidcIssuerConfig {
+    /// Issuer URL, matched exactly against the token's `iss` claim.
+    pub issuer_url: String,
+    /// Audience the token's `aud` claim must contain.
+    pub audience: String,
+    /// JWKS endpoint. When absent, it is discovered from
+    /// `<issuer_url>/.well-known/openid-configuration`.
+    #[serde(default)]
+    pub jwks_uri: Option<String>,
+}
+
+impl AuthConfig {
+    /// Cross-field validation, run as part of [`AppConfig::load`].
+    pub fn validate(&self) -> Result<(), MeridianError> {
+        if let Some(bootstrap) = &self.bootstrap_admin
+            && (bootstrap.issuer.is_empty() || bootstrap.subject.is_empty())
+        {
+            return Err(MeridianError::Validation(
+                "auth.bootstrap_admin must set both issuer and subject".to_owned(),
+            ));
+        }
+        if self.mode == AuthMode::Disabled {
+            return Ok(());
+        }
+        if self.oidc.issuers.is_empty() {
+            return Err(MeridianError::Validation(
+                "auth.mode is \"oidc\" but auth.oidc.issuers is empty; configure at least one \
+                 issuer or set auth.mode = \"disabled\""
+                    .to_owned(),
+            ));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for issuer in &self.oidc.issuers {
+            if issuer.issuer_url.is_empty() {
+                return Err(MeridianError::Validation(
+                    "auth.oidc.issuers entries must set issuer_url".to_owned(),
+                ));
+            }
+            if issuer.audience.is_empty() {
+                return Err(MeridianError::Validation(format!(
+                    "auth.oidc issuer {:?} must set a non-empty audience",
+                    issuer.issuer_url
+                )));
+            }
+            if self.oidc.require_https_issuers && !issuer.issuer_url.starts_with("https://") {
+                return Err(MeridianError::Validation(format!(
+                    "auth.oidc issuer {:?} is not https; use https or (for tests only) set \
+                     auth.oidc.require_https_issuers = false",
+                    issuer.issuer_url
+                )));
+            }
+            if !seen.insert(issuer.issuer_url.as_str()) {
+                return Err(MeridianError::Validation(format!(
+                    "auth.oidc issuer {:?} is configured more than once",
+                    issuer.issuer_url
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// HTTP server settings.
@@ -150,9 +285,11 @@ impl AppConfig {
             )
             .merge(Env::prefixed(ENV_PREFIX).split("__"));
 
-        figment
+        let config: Self = figment
             .extract()
-            .map_err(|e| MeridianError::Validation(format!("invalid configuration: {e}")))
+            .map_err(|e| MeridianError::Validation(format!("invalid configuration: {e}")))?;
+        config.auth.validate()?;
+        Ok(config)
     }
 
     /// The socket address string the server should bind.
@@ -227,5 +364,102 @@ mod tests {
     fn missing_explicit_config_file_is_an_error() {
         let err = AppConfig::load(Some(Path::new("/nonexistent/meridian.toml"))).unwrap_err();
         assert!(matches!(err, MeridianError::Validation(_)));
+    }
+
+    #[test]
+    fn auth_defaults_to_disabled() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.auth.mode, AuthMode::Disabled);
+        assert_eq!(cfg.auth.oidc.clock_skew_secs, 60);
+        assert!(cfg.auth.oidc.require_https_issuers);
+        assert!(cfg.auth.oidc.issuers.is_empty());
+        assert!(cfg.auth.validate().is_ok());
+    }
+
+    #[test]
+    fn oidc_config_loads_from_toml() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "meridian.toml",
+                r#"
+                    [auth]
+                    mode = "oidc"
+
+                    [auth.oidc]
+                    clock_skew_secs = 30
+                    service_claim = "meridian_service"
+
+                    [[auth.oidc.issuers]]
+                    issuer_url = "https://idp.example.com"
+                    audience = "meridian"
+
+                    [[auth.oidc.issuers]]
+                    issuer_url = "https://other.example.com"
+                    audience = "meridian"
+                    jwks_uri = "https://other.example.com/keys"
+                "#,
+            )?;
+            let cfg = AppConfig::load(None).expect("load config");
+            assert_eq!(cfg.auth.mode, AuthMode::Oidc);
+            assert_eq!(cfg.auth.oidc.clock_skew_secs, 30);
+            assert_eq!(
+                cfg.auth.oidc.service_claim.as_deref(),
+                Some("meridian_service")
+            );
+            assert_eq!(cfg.auth.oidc.issuers.len(), 2);
+            assert_eq!(cfg.auth.oidc.issuers[0].jwks_uri, None);
+            assert_eq!(
+                cfg.auth.oidc.issuers[1].jwks_uri.as_deref(),
+                Some("https://other.example.com/keys")
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn oidc_mode_without_issuers_is_rejected() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("meridian.toml", "[auth]\nmode = \"oidc\"\n")?;
+            let err = AppConfig::load(None).expect_err("must reject issuer-less oidc");
+            assert!(err.to_string().contains("issuers is empty"), "{err}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn non_https_issuer_is_rejected_unless_opted_out() {
+        let mut cfg = AppConfig::default();
+        cfg.auth.mode = AuthMode::Oidc;
+        cfg.auth.oidc.issuers.push(OidcIssuerConfig {
+            issuer_url: "http://idp.local".to_owned(),
+            audience: "meridian".to_owned(),
+            jwks_uri: None,
+        });
+        let err = cfg
+            .auth
+            .validate()
+            .expect_err("http issuer must be rejected");
+        assert!(err.to_string().contains("not https"), "{err}");
+
+        cfg.auth.oidc.require_https_issuers = false;
+        assert!(cfg.auth.validate().is_ok());
+    }
+
+    #[test]
+    fn duplicate_issuers_are_rejected() {
+        let mut cfg = AppConfig::default();
+        cfg.auth.mode = AuthMode::Oidc;
+        for _ in 0..2 {
+            cfg.auth.oidc.issuers.push(OidcIssuerConfig {
+                issuer_url: "https://idp.example.com".to_owned(),
+                audience: "meridian".to_owned(),
+                jwks_uri: None,
+            });
+        }
+        let err = cfg
+            .auth
+            .validate()
+            .expect_err("duplicate issuer must be rejected");
+        assert!(err.to_string().contains("more than once"), "{err}");
     }
 }

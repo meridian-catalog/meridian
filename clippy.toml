@@ -1,0 +1,7 @@
+# Workspace clippy configuration.
+#
+# doc-valid-idents: identifiers clippy's doc_markdown lint accepts without
+# backticks. ".." keeps clippy's built-in list (OAuth, JavaScript, ...);
+# IdP (identity provider) is standard authentication vocabulary used across
+# the auth module and the principal contract.
+doc-valid-idents = ["IdP", "IdPs", ".."]
