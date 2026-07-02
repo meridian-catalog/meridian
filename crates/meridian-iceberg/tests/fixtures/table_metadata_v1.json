@@ -1,0 +1,59 @@
+{
+  "format-version": 1,
+  "table-uuid": "d20125c8-7284-442c-9aea-15fee620737c",
+  "location": "s3://warehouse/legacy/orders",
+  "last-updated-ms": 1602638573874,
+  "last-column-id": 3,
+  "schema": {
+    "type": "struct",
+    "fields": [
+      {
+        "id": 1,
+        "name": "order_id",
+        "required": true,
+        "type": "long"
+      },
+      {
+        "id": 2,
+        "name": "order_date",
+        "required": true,
+        "type": "date"
+      },
+      {
+        "id": 3,
+        "name": "total",
+        "required": false,
+        "type": "decimal(10,2)"
+      }
+    ]
+  },
+  "partition-spec": [
+    {
+      "name": "order_date_day",
+      "transform": "day",
+      "source-id": 2
+    }
+  ],
+  "properties": {
+    "write.format.default": "parquet"
+  },
+  "current-snapshot-id": 3051729675574597004,
+  "snapshots": [
+    {
+      "snapshot-id": 3051729675574597004,
+      "timestamp-ms": 1602638573590,
+      "summary": {
+        "operation": "append"
+      },
+      "manifests": [
+        "s3://warehouse/legacy/orders/metadata/manifest-list-1.avro"
+      ]
+    }
+  ],
+  "snapshot-log": [
+    {
+      "snapshot-id": 3051729675574597004,
+      "timestamp-ms": 1602638573590
+    }
+  ]
+}

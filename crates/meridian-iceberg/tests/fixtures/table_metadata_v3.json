@@ -1,0 +1,176 @@
+{
+  "format-version": 3,
+  "table-uuid": "1b2c3d4e-5f60-4718-a293-b4c5d6e7f809",
+  "location": "s3://warehouse/geo/sensor_readings",
+  "last-sequence-number": 2,
+  "next-row-id": 150000,
+  "last-updated-ms": 1751500000000,
+  "last-column-id": 9,
+  "current-schema-id": 0,
+  "schemas": [
+    {
+      "type": "struct",
+      "schema-id": 0,
+      "fields": [
+        {
+          "id": 1,
+          "name": "reading_id",
+          "required": true,
+          "type": "long"
+        },
+        {
+          "id": 2,
+          "name": "recorded_at",
+          "required": true,
+          "type": "timestamptz_ns"
+        },
+        {
+          "id": 3,
+          "name": "position",
+          "required": false,
+          "type": "geometry(OGC:CRS84)"
+        },
+        {
+          "id": 4,
+          "name": "coverage",
+          "required": false,
+          "type": "geography(srid:4326,spherical)"
+        },
+        {
+          "id": 5,
+          "name": "payload",
+          "required": false,
+          "type": "variant"
+        },
+        {
+          "id": 6,
+          "name": "source",
+          "required": true,
+          "type": "string",
+          "initial-default": "backfill",
+          "write-default": "live"
+        },
+        {
+          "id": 7,
+          "name": "attributes",
+          "required": false,
+          "type": {
+            "type": "map",
+            "key-id": 8,
+            "key": "string",
+            "value-id": 9,
+            "value": "unknown",
+            "value-required": false
+          }
+        }
+      ]
+    }
+  ],
+  "partition-specs": [
+    {
+      "spec-id": 0,
+      "fields": [
+        {
+          "field-id": 1000,
+          "source-id": 2,
+          "name": "recorded_at_hour",
+          "transform": "hour"
+        }
+      ]
+    }
+  ],
+  "default-spec-id": 0,
+  "last-partition-id": 1000,
+  "sort-orders": [
+    {
+      "order-id": 0,
+      "fields": []
+    }
+  ],
+  "default-sort-order-id": 0,
+  "properties": {
+    "write.metadata.previous-versions-max": "5"
+  },
+  "current-snapshot-id": 1000000000000000001,
+  "snapshots": [
+    {
+      "snapshot-id": 1000000000000000000,
+      "sequence-number": 1,
+      "timestamp-ms": 1751490000000,
+      "manifest-list": "s3://warehouse/geo/sensor_readings/metadata/snap-1000000000000000000.avro",
+      "schema-id": 0,
+      "first-row-id": 0,
+      "added-rows": 100000,
+      "summary": {
+        "operation": "append",
+        "added-records": "100000"
+      }
+    },
+    {
+      "snapshot-id": 1000000000000000001,
+      "parent-snapshot-id": 1000000000000000000,
+      "sequence-number": 2,
+      "timestamp-ms": 1751500000000,
+      "manifest-list": "s3://warehouse/geo/sensor_readings/metadata/snap-1000000000000000001.avro",
+      "schema-id": 0,
+      "first-row-id": 100000,
+      "added-rows": 50000,
+      "summary": {
+        "operation": "append",
+        "added-records": "50000"
+      }
+    }
+  ],
+  "snapshot-log": [
+    {
+      "snapshot-id": 1000000000000000000,
+      "timestamp-ms": 1751490000000
+    },
+    {
+      "snapshot-id": 1000000000000000001,
+      "timestamp-ms": 1751500000000
+    }
+  ],
+  "refs": {
+    "main": {
+      "snapshot-id": 1000000000000000001,
+      "type": "branch"
+    }
+  },
+  "encryption-keys": [
+    {
+      "key-id": "key-2026-06",
+      "encrypted-key-metadata": "c2VjcmV0LWtleS1tZXRhZGF0YQ==",
+      "encrypted-by-id": "kek-1",
+      "properties": {
+        "provider": "kms"
+      }
+    }
+  ],
+  "statistics": [
+    {
+      "snapshot-id": 1000000000000000001,
+      "statistics-path": "s3://warehouse/geo/sensor_readings/metadata/stats-2.puffin",
+      "file-size-in-bytes": 2048,
+      "file-footer-size-in-bytes": 128,
+      "blob-metadata": [
+        {
+          "type": "apache-datasketches-theta-v1",
+          "snapshot-id": 1000000000000000001,
+          "sequence-number": 2,
+          "fields": [1],
+          "properties": {
+            "ndv": "150000"
+          }
+        }
+      ]
+    }
+  ],
+  "partition-statistics": [
+    {
+      "snapshot-id": 1000000000000000001,
+      "statistics-path": "s3://warehouse/geo/sensor_readings/metadata/partition-stats-2.parquet",
+      "file-size-in-bytes": 512
+    }
+  ]
+}

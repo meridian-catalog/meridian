@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use super::transform::Transform;
+
 /// A sort order: how rows are sorted within data files.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -16,12 +18,31 @@ pub struct SortOrder {
     pub extra: Map<String, Value>,
 }
 
+impl SortOrder {
+    /// The unsorted order: id 0, no fields.
+    #[must_use]
+    pub fn unsorted() -> Self {
+        Self {
+            order_id: 0,
+            fields: Vec::new(),
+            extra: Map::new(),
+        }
+    }
+
+    /// Structural equality ignoring `order-id` (used to detect re-adds of
+    /// an existing order).
+    #[must_use]
+    pub fn same_structure(&self, other: &Self) -> bool {
+        self.fields == other.fields && self.extra == other.extra
+    }
+}
+
 /// One sort field.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct SortField {
-    /// Transform applied before sorting, e.g. `"identity"`.
-    pub transform: String,
+    /// Transform applied before sorting, e.g. `identity`.
+    pub transform: Transform,
     /// Source column field id in the table schema.
     pub source_id: i32,
     /// Sort direction.

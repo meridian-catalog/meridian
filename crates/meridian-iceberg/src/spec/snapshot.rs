@@ -29,8 +29,16 @@ pub struct Snapshot {
     /// Schema id current when this snapshot was written.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema_id: Option<i32>,
-    /// Unknown fields (e.g. v3 `first-row-id`, `key-metadata`), preserved
-    /// verbatim.
+    /// v3 row lineage: the first `_row_id` assigned to rows in this
+    /// snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_row_id: Option<i64>,
+    /// v3 row lineage: upper bound of the number of rows assigned row ids
+    /// by this snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub added_rows: Option<i64>,
+    /// Unknown fields (e.g. v1 inline `manifests`, encryption
+    /// `key-metadata`), preserved verbatim.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }

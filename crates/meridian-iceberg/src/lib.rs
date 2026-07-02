@@ -1,6 +1,7 @@
-//! Iceberg domain logic: the table-metadata model, the commit-protocol
-//! contract (see `docs/design/commit-protocol.md`; the store-backed
-//! implementation lands in M1), and (in M2) scan planning.
+//! Iceberg domain logic: the table-metadata model (v1-read/v2/v3), the REST
+//! update/requirement vocabulary and the validating metadata builder, the
+//! commit-protocol contract (see `docs/design/commit-protocol.md`; the
+//! store-backed implementation lands in M1), and (in M2) scan planning.
 //!
 //! Design rule for this crate: **never destroy metadata we do not model.**
 //! Every serde struct carries a flattened `extra` map that preserves unknown
