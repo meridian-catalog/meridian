@@ -1,0 +1,23 @@
+[package]
+name = "meridian-cli"
+description = "The meridian binary: serves the catalog and (soon) admin commands"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "meridian"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+meridian-common = { workspace = true }
+meridian-server = { workspace = true }
+meridian-store = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

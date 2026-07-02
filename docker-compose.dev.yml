@@ -1,0 +1,39 @@
+# Local development stack: Postgres + the Meridian server.
+#
+#   docker compose -f docker-compose.dev.yml up --build
+#
+# Postgres is intentionally NOT published to the host: the server reaches it
+# over the compose network, and publishing it would clash with the standalone
+# meridian-dev-pg container on 5433 that docs/dev.md uses for cargo tests.
+# To poke at this stack's database:
+#   docker compose -f docker-compose.dev.yml exec postgres psql -U meridian
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: meridian-compose-pg
+    environment:
+      POSTGRES_USER: meridian
+      POSTGRES_PASSWORD: meridian
+      POSTGRES_DB: meridian
+    volumes:
+      - meridian-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meridian -d meridian"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  meridian:
+    build: .
+    image: meridian:dev
+    ports:
+      - "8181:8181"
+    environment:
+      DATABASE_URL: postgres://meridian:meridian@postgres:5432/meridian
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  meridian-pg-data:

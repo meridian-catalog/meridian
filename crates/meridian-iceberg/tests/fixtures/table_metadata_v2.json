@@ -1,0 +1,222 @@
+{
+  "format-version": 2,
+  "table-uuid": "9c12d441-03fe-4693-9a96-a0705ddf69c1",
+  "location": "s3://warehouse/analytics/events",
+  "last-sequence-number": 34,
+  "last-updated-ms": 1751444210834,
+  "last-column-id": 5,
+  "current-schema-id": 1,
+  "schemas": [
+    {
+      "type": "struct",
+      "schema-id": 0,
+      "fields": [
+        {
+          "id": 1,
+          "name": "event_id",
+          "required": true,
+          "type": "long"
+        },
+        {
+          "id": 2,
+          "name": "event_ts",
+          "required": true,
+          "type": "timestamptz"
+        },
+        {
+          "id": 3,
+          "name": "payload",
+          "required": false,
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "type": "struct",
+      "schema-id": 1,
+      "identifier-field-ids": [1],
+      "fields": [
+        {
+          "id": 1,
+          "name": "event_id",
+          "required": true,
+          "type": "long"
+        },
+        {
+          "id": 2,
+          "name": "event_ts",
+          "required": true,
+          "type": "timestamptz",
+          "doc": "Event occurrence time"
+        },
+        {
+          "id": 3,
+          "name": "payload",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "id": 4,
+          "name": "tags",
+          "required": false,
+          "type": {
+            "type": "list",
+            "element-id": 5,
+            "element": "string",
+            "element-required": false
+          }
+        },
+        {
+          "id": 6,
+          "name": "region",
+          "required": false,
+          "type": "string",
+          "initial-default": "unknown",
+          "write-default": "unknown"
+        }
+      ]
+    }
+  ],
+  "default-spec-id": 0,
+  "partition-specs": [
+    {
+      "spec-id": 0,
+      "fields": [
+        {
+          "source-id": 2,
+          "field-id": 1000,
+          "name": "event_ts_day",
+          "transform": "day"
+        },
+        {
+          "source-id": 1,
+          "field-id": 1001,
+          "name": "event_id_bucket",
+          "transform": "bucket[16]"
+        }
+      ]
+    }
+  ],
+  "last-partition-id": 1001,
+  "default-sort-order-id": 1,
+  "sort-orders": [
+    {
+      "order-id": 0,
+      "fields": []
+    },
+    {
+      "order-id": 1,
+      "fields": [
+        {
+          "transform": "identity",
+          "source-id": 2,
+          "direction": "asc",
+          "null-order": "nulls-first"
+        },
+        {
+          "transform": "bucket[16]",
+          "source-id": 1,
+          "direction": "desc",
+          "null-order": "nulls-last"
+        }
+      ]
+    }
+  ],
+  "properties": {
+    "write.format.default": "parquet",
+    "write.parquet.compression-codec": "zstd",
+    "commit.retry.num-retries": "4"
+  },
+  "current-snapshot-id": 3055729675574597004,
+  "snapshots": [
+    {
+      "snapshot-id": 3051729675574597004,
+      "sequence-number": 33,
+      "timestamp-ms": 1751440210834,
+      "manifest-list": "s3://warehouse/analytics/events/metadata/snap-3051729675574597004-1-9fb3e4dc.avro",
+      "schema-id": 0,
+      "summary": {
+        "operation": "append",
+        "added-data-files": "4",
+        "added-records": "100000",
+        "total-records": "100000"
+      }
+    },
+    {
+      "snapshot-id": 3055729675574597004,
+      "parent-snapshot-id": 3051729675574597004,
+      "sequence-number": 34,
+      "timestamp-ms": 1751444210834,
+      "manifest-list": "s3://warehouse/analytics/events/metadata/snap-3055729675574597004-1-046d820c.avro",
+      "schema-id": 1,
+      "first-row-id": 100000,
+      "summary": {
+        "operation": "append",
+        "added-data-files": "2",
+        "added-records": "42017",
+        "total-records": "142017",
+        "engine-name": "spark",
+        "engine-version": "3.5.1"
+      }
+    }
+  ],
+  "snapshot-log": [
+    {
+      "snapshot-id": 3051729675574597004,
+      "timestamp-ms": 1751440210834
+    },
+    {
+      "snapshot-id": 3055729675574597004,
+      "timestamp-ms": 1751444210834
+    }
+  ],
+  "metadata-log": [
+    {
+      "metadata-file": "s3://warehouse/analytics/events/metadata/00000-8a62c37d.metadata.json",
+      "timestamp-ms": 1751440210000
+    },
+    {
+      "metadata-file": "s3://warehouse/analytics/events/metadata/00001-1f8b3a90.metadata.json",
+      "timestamp-ms": 1751440210834
+    }
+  ],
+  "refs": {
+    "main": {
+      "snapshot-id": 3055729675574597004,
+      "type": "branch",
+      "min-snapshots-to-keep": 10,
+      "max-snapshot-age-ms": 604800000
+    },
+    "release-2026-06": {
+      "snapshot-id": 3051729675574597004,
+      "type": "tag",
+      "max-ref-age-ms": 31536000000
+    }
+  },
+  "statistics": [
+    {
+      "snapshot-id": 3055729675574597004,
+      "statistics-path": "s3://warehouse/analytics/events/metadata/stats-3055729675574597004.puffin",
+      "file-size-in-bytes": 41321,
+      "file-footer-size-in-bytes": 512,
+      "blob-metadata": [
+        {
+          "type": "apache-datasketches-theta-v1",
+          "snapshot-id": 3055729675574597004,
+          "sequence-number": 34,
+          "fields": [1]
+        }
+      ]
+    }
+  ],
+  "partition-statistics": [
+    {
+      "snapshot-id": 3055729675574597004,
+      "statistics-path": "s3://warehouse/analytics/events/metadata/partition-stats-3055729675574597004.parquet",
+      "file-size-in-bytes": 8123
+    }
+  ],
+  "x-meridian-test-unknown-top-level": {
+    "nested": ["values", 1, true, null]
+  }
+}

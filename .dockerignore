@@ -1,0 +1,15 @@
+# Keep the build context small: only what the Dockerfile copies matters.
+.git/
+.github/
+target/
+**/target/
+docs/
+console/
+node_modules/
+*.md
+!crates/**/*.md
+docker-compose*.yml
+Dockerfile
+.dockerignore
+.env
+.env.*
