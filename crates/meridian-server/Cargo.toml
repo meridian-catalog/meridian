@@ -13,6 +13,8 @@ chrono = { workspace = true }
 hex = { workspace = true }
 http = { workspace = true }
 meridian-common = { workspace = true }
+meridian-iceberg = { workspace = true }
+meridian-storage = { workspace = true }
 meridian-store = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -22,9 +24,11 @@ tower = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 ulid = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 http-body-util = { workspace = true }
+tempfile = "3.20"
 
 [lints]
 workspace = true

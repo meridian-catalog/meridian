@@ -23,7 +23,21 @@ const IMPLEMENTED_ENDPOINTS: &[&str] = &[
     "HEAD /v1/{prefix}/namespaces/{namespace}",
     "DELETE /v1/{prefix}/namespaces/{namespace}",
     "POST /v1/{prefix}/namespaces/{namespace}/properties",
+    "GET /v1/{prefix}/namespaces/{namespace}/tables",
+    "POST /v1/{prefix}/namespaces/{namespace}/tables",
+    "GET /v1/{prefix}/namespaces/{namespace}/tables/{table}",
+    "HEAD /v1/{prefix}/namespaces/{namespace}/tables/{table}",
+    "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}",
+    "DELETE /v1/{prefix}/namespaces/{namespace}/tables/{table}",
+    "POST /v1/{prefix}/namespaces/{namespace}/register",
+    "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics",
+    "POST /v1/{prefix}/tables/rename",
+    "POST /v1/{prefix}/transactions/commit",
 ];
+
+/// How long idempotency-key receipts are replayable, advertised to clients
+/// (ISO-8601 duration; must match the store's retention).
+const IDEMPOTENCY_KEY_LIFETIME: &str = "PT24H";
 
 /// The Iceberg REST `ConfigResponse`: catalog defaults the client should
 /// start from, overrides the client must apply, and the endpoint set the
@@ -37,6 +51,13 @@ pub struct CatalogConfig {
     /// Endpoint identifiers the server supports.
     #[serde(default)]
     pub endpoints: Vec<String>,
+    /// How long `Idempotency-Key` receipts are replayable (ISO-8601
+    /// duration), per the spec's config response.
+    #[serde(
+        rename = "idempotency-key-lifetime",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub idempotency_key_lifetime: Option<String>,
 }
 
 /// Query parameters accepted by `GET /v1/config`.
@@ -69,5 +90,6 @@ pub async fn get_config(
             .iter()
             .map(|s| (*s).to_owned())
             .collect(),
+        idempotency_key_lifetime: Some(IDEMPOTENCY_KEY_LIFETIME.to_owned()),
     }))
 }

@@ -53,6 +53,33 @@ impl ApiError {
         Self::new(StatusCode::NOT_FOUND, "NoSuchNamespaceException", message)
     }
 
+    /// 404 `NoSuchTableException`.
+    #[must_use]
+    pub fn no_such_table(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::NOT_FOUND, "NoSuchTableException", message)
+    }
+
+    /// 409 `CommitFailedException`: a commit requirement failed or the
+    /// retry budget for the compare-and-set race is exhausted. The client
+    /// must refresh table state and rebuild its commit.
+    #[must_use]
+    pub fn commit_failed(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "CommitFailedException", message)
+    }
+
+    /// 500 `CommitStateUnknownException`: the commit reached the point of no
+    /// return and its outcome could not be determined (design doc F3). The
+    /// client must not assume failure; retrying with the same idempotency
+    /// key resolves the ambiguity.
+    #[must_use]
+    pub fn commit_state_unknown(message: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "CommitStateUnknownException",
+            message,
+        )
+    }
+
     /// 409 `AlreadyExistsException` (the YAML's `NamespaceAlreadyExistsError`
     /// example uses this type string).
     #[must_use]

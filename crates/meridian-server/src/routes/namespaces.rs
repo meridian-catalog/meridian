@@ -65,7 +65,7 @@ fn validate_levels(levels: &[String]) -> Result<(), ApiError> {
 
 /// Decodes a `{namespace}` path parameter (or `parent` query parameter) into
 /// levels by splitting on the unit separator.
-fn decode_namespace_param(raw: &str) -> Result<Vec<String>, ApiError> {
+pub(crate) fn decode_namespace_param(raw: &str) -> Result<Vec<String>, ApiError> {
     let levels: Vec<String> = raw.split(UNIT_SEPARATOR).map(str::to_owned).collect();
     validate_levels(&levels)?;
     Ok(levels)
@@ -77,16 +77,69 @@ fn decode_namespace_param(raw: &str) -> Result<Vec<String>, ApiError> {
 /// clients, cheap to verify, and stable under concurrent inserts (keyset
 /// pagination never skips or repeats rows that existed when their page was
 /// read).
-fn encode_page_token(last_id: &str) -> String {
+pub(crate) fn encode_page_token(last_id: &str) -> String {
     hex::encode(last_id.as_bytes())
 }
 
-fn decode_page_token(token: &str) -> Result<String, ApiError> {
+pub(crate) fn decode_page_token(token: &str) -> Result<String, ApiError> {
     let invalid = || ApiError::bad_request("invalid pageToken");
     let bytes = hex::decode(token).map_err(|_| invalid())?;
     let id = String::from_utf8(bytes).map_err(|_| invalid())?;
     Ulid::from_str(&id).map_err(|_| invalid())?;
     Ok(id)
+}
+
+/// Resolved pagination inputs for a list endpoint.
+///
+/// Pagination engages when the client signals it (a `pageToken` — possibly
+/// empty — or a `pageSize`); otherwise the spec requires all results in one
+/// response with a `null` next-page-token.
+#[derive(Debug)]
+pub(crate) struct Pagination {
+    /// Page bound (`None` disables pagination).
+    pub(crate) limit: Option<i64>,
+    /// Keyset cursor: the id of the last row of the previous page.
+    pub(crate) after_id: Option<String>,
+}
+
+pub(crate) fn resolve_pagination(
+    page_token: Option<&str>,
+    page_size: Option<i64>,
+) -> Result<Pagination, ApiError> {
+    if page_token.is_none() && page_size.is_none() {
+        return Ok(Pagination {
+            limit: None,
+            after_id: None,
+        });
+    }
+    let size = page_size.unwrap_or(DEFAULT_PAGE_SIZE);
+    if size < 1 {
+        return Err(ApiError::bad_request("pageSize must be at least 1"));
+    }
+    let after_id = match page_token.filter(|t| !t.is_empty()) {
+        Some(token) => Some(decode_page_token(token)?),
+        None => None,
+    };
+    Ok(Pagination {
+        limit: Some(size.min(MAX_PAGE_SIZE)),
+        after_id,
+    })
+}
+
+/// Truncates an over-fetched page (`limit + 1` rows requested) and returns
+/// the continuation token when another page exists.
+pub(crate) fn next_page_token<T>(
+    rows: &mut Vec<T>,
+    limit: Option<i64>,
+    id_of: impl Fn(&T) -> &str,
+) -> Option<String> {
+    let size = usize::try_from(limit?).ok()?;
+    if rows.len() > size {
+        rows.truncate(size);
+        rows.last().map(|row| encode_page_token(id_of(row)))
+    } else {
+        None
+    }
 }
 
 /// Query parameters for `GET /{prefix}/namespaces`.
@@ -138,43 +191,20 @@ pub async fn list_namespaces(
         None => Vec::new(),
     };
 
-    // Pagination engages when the client signals it (a pageToken — possibly
-    // empty — or a pageSize). Otherwise the spec requires all results in one
-    // response with a null next-page-token.
-    let paginating = query.page_token.is_some() || query.page_size.is_some();
-    let (limit, after_id) = if paginating {
-        let size = query.page_size.unwrap_or(DEFAULT_PAGE_SIZE);
-        if size < 1 {
-            return Err(ApiError::bad_request("pageSize must be at least 1"));
-        }
-        let size = size.min(MAX_PAGE_SIZE);
-        let after = match query.page_token.as_deref().filter(|t| !t.is_empty()) {
-            Some(token) => Some(decode_page_token(token)?),
-            None => None,
-        };
-        (Some(size), after)
-    } else {
-        (None, None)
-    };
+    let pagination = resolve_pagination(query.page_token.as_deref(), query.page_size)?;
 
     // Fetch one extra row to learn whether another page exists.
-    let fetch_limit = limit.map(|l| l + 1);
+    let fetch_limit = pagination.limit.map(|l| l + 1);
     let mut rows = namespace::list(
         &state.pool,
         &wh.id,
         &parent,
-        after_id.as_deref(),
+        pagination.after_id.as_deref(),
         fetch_limit,
     )
     .await?;
 
-    let next_page_token = match limit {
-        Some(size) if rows.len() > usize::try_from(size).unwrap_or(usize::MAX) => {
-            rows.truncate(usize::try_from(size).unwrap_or(usize::MAX));
-            rows.last().map(|r| encode_page_token(&r.id))
-        }
-        _ => None,
-    };
+    let next_page_token = next_page_token(&mut rows, pagination.limit, |r| &r.id);
 
     Ok(Json(ListNamespacesResponse {
         namespaces: rows.into_iter().map(|r| r.levels).collect(),

@@ -260,10 +260,22 @@ async fn config_resolves_warehouse_to_prefix_on_both_mounts() {
             endpoints.contains(&json!("GET /v1/{prefix}/namespaces")),
             "endpoints must list the namespace surface: {body}"
         );
+        for table_endpoint in [
+            "GET /v1/{prefix}/namespaces/{namespace}/tables",
+            "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}",
+            "POST /v1/{prefix}/tables/rename",
+            "POST /v1/{prefix}/transactions/commit",
+        ] {
+            assert!(
+                endpoints.contains(&json!(table_endpoint)),
+                "endpoints must list the table surface ({table_endpoint}): {body}"
+            );
+        }
+        // Only implemented endpoints may be advertised: views are not.
         assert!(
             !endpoints
                 .iter()
-                .any(|e| e.as_str().is_some_and(|s| s.contains("/tables"))),
+                .any(|e| e.as_str().is_some_and(|s| s.contains("/views"))),
             "only implemented endpoints may be advertised: {body}"
         );
     }

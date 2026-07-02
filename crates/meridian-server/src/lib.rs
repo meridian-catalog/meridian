@@ -71,6 +71,33 @@ pub fn build_router(state: AppState) -> Router {
             "/{prefix}/namespaces/{namespace}/properties",
             post(routes::namespaces::update_namespace_properties),
         )
+        .route(
+            "/{prefix}/namespaces/{namespace}/tables",
+            get(routes::tables::list_tables).post(routes::tables::create_table),
+        )
+        .route(
+            "/{prefix}/namespaces/{namespace}/tables/{table}",
+            get(routes::tables::load_table)
+                .head(routes::tables::table_exists)
+                .post(routes::tables::commit_table)
+                .delete(routes::tables::drop_table),
+        )
+        .route(
+            "/{prefix}/namespaces/{namespace}/register",
+            post(routes::tables::register_table),
+        )
+        .route(
+            "/{prefix}/namespaces/{namespace}/tables/{table}/metrics",
+            post(routes::tables::report_metrics),
+        )
+        .route(
+            "/{prefix}/tables/rename",
+            post(routes::tables::rename_table),
+        )
+        .route(
+            "/{prefix}/transactions/commit",
+            post(routes::tables::commit_transaction),
+        )
         // Nested routers do not inherit the outer fallbacks, so the IRC
         // error envelope for wrong methods must be installed here as well.
         .method_not_allowed_fallback(method_not_allowed);

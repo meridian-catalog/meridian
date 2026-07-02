@@ -130,6 +130,46 @@ pub(crate) async fn namespace_list(
     Ok(check(response).await?.json().await?)
 }
 
+/// `GET /v1/{prefix}/namespaces/{namespace}/tables`.
+pub(crate) async fn table_list(
+    server: &str,
+    warehouse: &str,
+    namespace: &[String],
+) -> Result<Value, CliError> {
+    let ns = encode_namespace(namespace);
+    let response = http_client()?
+        .get(format!(
+            "{}/v1/{warehouse}/namespaces/{ns}/tables",
+            base(server)
+        ))
+        .send()
+        .await?;
+    Ok(check(response).await?.json().await?)
+}
+
+/// `GET /v1/{prefix}/namespaces/{namespace}/tables/{table}`.
+pub(crate) async fn table_load(
+    server: &str,
+    warehouse: &str,
+    namespace: &[String],
+    table: &str,
+) -> Result<Value, CliError> {
+    let ns = encode_namespace(namespace);
+    let response = http_client()?
+        .get(format!(
+            "{}/v1/{warehouse}/namespaces/{ns}/tables/{table}",
+            base(server)
+        ))
+        .send()
+        .await?;
+    Ok(check(response).await?.json().await?)
+}
+
+/// Joins namespace levels with the URL-encoded unit separator.
+fn encode_namespace(levels: &[String]) -> String {
+    levels.join("%1F")
+}
+
 /// Renders rows as a plain aligned text table.
 #[must_use]
 pub(crate) fn render_table(headers: &[&str], rows: &[Vec<String>]) -> String {

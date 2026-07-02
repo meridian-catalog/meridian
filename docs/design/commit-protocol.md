@@ -2,9 +2,9 @@
 
 | | |
 |---|---|
-| **Status** | Accepted (design). Implementation lands in M1. |
+| **Status** | Accepted. Implemented (M1): `crates/meridian-store/src/commit.rs` (Postgres backend), `crates/meridian-server/src/routes/tables.rs` (endpoints + driver). |
 | **Scope** | The table-commit path: single-table commits, multi-table transactions, their invariants, failure handling, and the executable property suite that guards them. |
-| **Related** | [ADR 001](../adr/001-m0-foundation.md) (outbox, audit chain, ULID ids) · `crates/meridian-iceberg/src/commit.rs` (protocol contract) · `crates/meridian-iceberg/tests/commit_properties.rs` (executable properties) · [Iceberg REST catalog spec](https://iceberg.apache.org/rest-catalog-spec/) |
+| **Related** | [ADR 001](../adr/001-m0-foundation.md) (outbox, audit chain, ULID ids) · `crates/meridian-iceberg/src/commit.rs` (protocol contract) · `crates/meridian-iceberg/tests/commit_harness/` (executable properties, run against the model **and** the Postgres backend) · [Iceberg REST catalog spec](https://iceberg.apache.org/rest-catalog-spec/) |
 
 The commit path is the correctness-critical core of the catalog: it is the one
 place where losing a race means losing someone's data. The project rule is
@@ -69,9 +69,10 @@ outside it.
    loaded metadata, producing candidate metadata; validate structural
    invariants (ids resolve, refs point at snapshots that exist, monotonic
    `last-updated-ms`, etc.); write it to object storage as
-   `metadata/<v+1>-<ulid>.metadata.json`. The name is unique per attempt;
-   object PUTs are atomic, so a failed PUT leaves nothing partial. A PUT
-   failure aborts the transaction (rollback; nothing durable happened).
+   `metadata/<v+1>-<uuid>.metadata.json` (a random UUID — the file-name
+   convention engines write; unique per attempt). Object PUTs are atomic,
+   so a failed PUT leaves nothing partial. A PUT failure aborts the
+   transaction (rollback; nothing durable happened).
 8. **CAS the pointer.** The guarded `UPDATE` from §2. The guard is retained
    even though the row lock makes a lost race impossible within a healthy
    server — correctness must not depend on lock discipline alone (defense in
@@ -112,7 +113,7 @@ sequenceDiagram
             ENG-->>C: 409 CommitFailedException
         else requirements hold
             ENG->>ENG: apply updates, validate candidate metadata
-            ENG->>OS: PUT metadata/(V+1)-(ulid).metadata.json
+            ENG->>OS: PUT metadata/(V+1)-(uuid).metadata.json
             OS-->>ENG: durable
             ENG->>PG: UPDATE tables SET pointer_version = V+1,<br/>metadata_location = $new<br/>WHERE id = $t AND pointer_version = V
             ENG->>PG: INSERT index rows (snapshots, schemas, stats)
@@ -143,11 +144,15 @@ The property model (§9) is built on the CAS alone, with adversarial
 interleavings between load and swap — i.e. it verifies the protocol under
 *weaker* assumptions than the implementation actually runs with.
 
-Latency note: the lock is held across the storage PUT (step 7). The PUT must
-run under an aggressive timeout, and the transaction budget excluding the PUT
-stays in single-digit milliseconds. If profiling ever shows same-table lock
-convoys, the optimistic-staging variant above is the escape hatch — a
-performance change, not a correctness change.
+**Implementation note (M1).** The shipped implementation uses the
+optimistic-staging variant: the candidate file is staged *before* the
+transaction takes the row lock, and the lock is held only across the CAS and
+its bookkeeping (single-digit milliseconds, no storage I/O under the lock).
+The CAS guard carries invariant I1 exactly as designed; a guard failure
+re-enters `BaseLoaded` (requirements re-checked against the new state, a
+fresh file staged) and the loser's staged file is cleaned per §7.1. This is
+the trade sanctioned above: `Conflicted` is a reachable state, in exchange
+for never holding a row lock across a PUT.
 
 ## 4. Multi-table transactions
 
@@ -280,23 +285,29 @@ swap. Cleanup strategy:
 
 ## 8. Idempotency keys
 
-- The key is client-supplied, opaque, and scoped per workspace. (Exact
-  transport — header vs. request field — is fixed in M1 with the endpoint
-  implementations.)
+- The key is client-supplied, opaque, and scoped per workspace. **Transport
+  (fixed in M1):** the `Idempotency-Key` HTTP header, honored on the commit
+  endpoints (`POST …/tables/{table}` and `POST …/transactions/commit`).
+- **Fingerprint (fixed in M1):** the sha-256 of the canonical JSON of the
+  request identity (endpoint, prefix, table identifiers, and the full
+  request body) — stable across retries of the same logical request,
+  different for any other request.
 - On success, `(key, request_fingerprint, receipt)` is recorded **in the
   commit transaction** (step 10), so a receipt exists exactly when its commit
   is visible (I4/I5).
 - A retry with the same key and the same fingerprint returns the recorded
   receipt, marked as a replay. Same key with a *different* fingerprint is a
-  client error (F9) — never silently ignored, never applied.
+  client error (F9) — never silently ignored, never applied; surfaced as
+  `422 UnprocessableEntityException`.
 - Two concurrent requests with the same key: recall (step 2) may miss for
   both, so the recorded-receipt check is repeated inside the commit
   transaction, where the key's uniqueness is enforced. Exactly one applies;
   the other replays (or errors on fingerprint mismatch).
 - Failed commits are *not* recorded: an idempotency key protects against
   double-apply, not against retrying a failure.
-- Receipts have a retention window (proposal: 24 h; final value is an M1
-  configuration decision) after which a replayed key behaves as fresh.
+- Receipts are retained for 24 h (advertised to clients as
+  `idempotency-key-lifetime: PT24H` in the config response), after which a
+  replayed key behaves as fresh.
 
 ## 9. The property-test harness (executable spec)
 
@@ -310,8 +321,13 @@ swap. Cleanup strategy:
 - `commit_single_table` — the driver implementing the §6 loop: recall →
   load → check requirements → stage → CAS → bounded rebase-retry.
 
-`crates/meridian-iceberg/tests/commit_properties.rs` runs the properties
-against `MockCatalog`, a minimal in-memory `CommitBackend`. The mapping to
+The property bodies live in `crates/meridian-iceberg/tests/commit_harness/`
+and are instantiated twice: against `MockCatalog` (the minimal in-memory
+`CommitBackend`, in `commit_properties.rs`) and against the production
+`PostgresCommitBackend`
+(`crates/meridian-store/tests/commit_properties_pg.rs`, gated on
+`DATABASE_URL`; each case provisions fresh ULID-identified rows so the suite
+is parallel-safe against a shared database). The mapping from the model to
 the production implementation:
 
 | Model | Production (M1, Postgres) |
@@ -347,15 +363,29 @@ write-through content, audit/outbox rows, real storage I/O, and
 crash/fault injection (kill mid-transaction, storage 503s), which land with
 the store-backed tests and the chaos suite.
 
-## 10. Deferred to M1 (tracked, not forgotten)
+## 10. Milestone status
+
+Landed in M1:
 
 - Metadata-level requirement evaluation (`assert-ref-snapshot-id`, UUID and
-  schema assertions, …) against `TableMetadata`; the pointer-level
-  `PointerRequirement` in M0 is the protocol-model projection of it.
-- The multi-table driver (the per-table loop of §6 lifted over §4's lock
-  ordering); `commit_atomic` is already multi-table.
-- The Postgres `CommitBackend` implementation and its property/fault suites.
-- Idempotency transport (header vs. field), fingerprint definition (request
-  content hash), and retention configuration.
-- The orphan-sweep maintenance job (§7.1).
+  schema assertions, …) against `TableMetadata`
+  (`meridian-iceberg/src/spec/requirement.rs`, evaluated in the commit
+  driver); the pointer-level `PointerRequirement` remains the protocol-model
+  projection of it.
+- The multi-table driver (`POST /{prefix}/transactions/commit`) over §4's
+  lock ordering.
+- The Postgres `CommitBackend` (`meridian-store/src/commit.rs`) and its
+  property suite (the shared harness, run against Postgres).
+- Idempotency transport, fingerprint, and retention (§8).
+
+Still deferred (tracked, not forgotten):
+
+- The orphan-sweep maintenance job (§7.1); until it lands, orphan cleanup is
+  best-effort immediate deletion only (orphans are garbage, never
+  corruption).
+- Crash/fault injection (kill mid-transaction, storage 503s) — the chaos
+  suite.
 - Pre-commit hook insertion (§3 step 6) once contracts exist.
+- Requirement evaluation served from the Postgres index (§3 step 6 mentions
+  the index fast path); the implementation currently always reads the
+  current `metadata.json`, which it needs anyway as the update base.

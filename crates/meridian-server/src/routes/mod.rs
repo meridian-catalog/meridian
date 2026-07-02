@@ -3,6 +3,7 @@
 pub mod health;
 pub mod iceberg;
 pub mod namespaces;
+pub mod tables;
 pub mod warehouses;
 
 /// Principal recorded in audit rows while the API is pre-authentication.

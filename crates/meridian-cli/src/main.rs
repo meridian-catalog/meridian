@@ -52,6 +52,43 @@ enum Command {
     /// Manage namespaces on a running server.
     #[command(subcommand)]
     Namespace(NamespaceCommand),
+
+    /// Inspect tables on a running server.
+    #[command(subcommand)]
+    Table(TableCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum TableCommand {
+    /// List tables of a namespace.
+    List {
+        /// Namespace to list (dot-separated for multi-level).
+        #[arg(value_name = "NAMESPACE")]
+        namespace: String,
+
+        /// Warehouse the namespace belongs to.
+        #[arg(long)]
+        warehouse: String,
+
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+    },
+
+    /// Show a table's identity, pointer, and key metadata fields.
+    Describe {
+        /// The table as namespace.table (dot-separated).
+        #[arg(value_name = "NAMESPACE.TABLE")]
+        table: String,
+
+        /// Warehouse the table belongs to.
+        #[arg(long)]
+        warehouse: String,
+
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -129,6 +166,7 @@ fn main() -> ExitCode {
         }
         Command::Warehouse(command) => run_async(run_warehouse(command)),
         Command::Namespace(command) => run_async(run_namespace(command)),
+        Command::Table(command) => run_async(run_table(command)),
     };
 
     match result {
@@ -258,6 +296,107 @@ async fn run_namespace(command: NamespaceCommand) -> Result<(), CliError> {
             print!("{}", client::render_table(&["NAMESPACE"], &rows));
             Ok(())
         }
+    }
+}
+
+async fn run_table(command: TableCommand) -> Result<(), CliError> {
+    match command {
+        TableCommand::List {
+            namespace,
+            warehouse,
+            server,
+        } => {
+            let levels = parse_namespace_arg(&namespace)?;
+            let body = client::table_list(&server, &warehouse, &levels).await?;
+            let identifiers = body
+                .get("identifiers")
+                .and_then(Value::as_array)
+                .ok_or_else(|| CliError("malformed response: missing identifiers".to_owned()))?;
+            let rows: Vec<Vec<String>> = identifiers
+                .iter()
+                .map(|ident| {
+                    let ns = ident
+                        .get("namespace")
+                        .and_then(Value::as_array)
+                        .map_or_else(
+                            || "?".to_owned(),
+                            |levels| {
+                                levels
+                                    .iter()
+                                    .map(|l| l.as_str().unwrap_or("?"))
+                                    .collect::<Vec<_>>()
+                                    .join(".")
+                            },
+                        );
+                    let name = ident.get("name").and_then(Value::as_str).unwrap_or("?");
+                    vec![ns, name.to_owned()]
+                })
+                .collect();
+            print!("{}", client::render_table(&["NAMESPACE", "TABLE"], &rows));
+            Ok(())
+        }
+        TableCommand::Describe {
+            table,
+            warehouse,
+            server,
+        } => {
+            let mut levels = parse_namespace_arg(&table)?;
+            if levels.len() < 2 {
+                return Err(CliError(format!(
+                    "invalid table {table:?}: expected namespace.table"
+                )));
+            }
+            let name = levels.pop().unwrap_or_default();
+            let body = client::table_load(&server, &warehouse, &levels, &name).await?;
+
+            let metadata = body.get("metadata").cloned().unwrap_or(Value::Null);
+            let string_at = |value: &Value, key: &str| {
+                value.get(key).map_or_else(|| "-".to_owned(), render_scalar)
+            };
+            let snapshot_count = metadata
+                .get("snapshots")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+
+            let rows = vec![
+                vec!["table".to_owned(), format!("{}.{name}", levels.join("."))],
+                vec![
+                    "metadata-location".to_owned(),
+                    string_at(&body, "metadata-location"),
+                ],
+                vec!["table-uuid".to_owned(), string_at(&metadata, "table-uuid")],
+                vec![
+                    "format-version".to_owned(),
+                    string_at(&metadata, "format-version"),
+                ],
+                vec!["location".to_owned(), string_at(&metadata, "location")],
+                vec![
+                    "current-schema-id".to_owned(),
+                    string_at(&metadata, "current-schema-id"),
+                ],
+                vec![
+                    "current-snapshot-id".to_owned(),
+                    string_at(&metadata, "current-snapshot-id"),
+                ],
+                vec!["snapshots".to_owned(), snapshot_count.to_string()],
+                vec![
+                    "last-updated-ms".to_owned(),
+                    string_at(&metadata, "last-updated-ms"),
+                ],
+            ];
+            print!("{}", client::render_table(&["FIELD", "VALUE"], &rows));
+            Ok(())
+        }
+    }
+}
+
+/// Renders a scalar JSON value without quotes; non-scalars fall back to
+/// compact JSON.
+fn render_scalar(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Null => "-".to_owned(),
+        other => other.to_string(),
     }
 }
 
