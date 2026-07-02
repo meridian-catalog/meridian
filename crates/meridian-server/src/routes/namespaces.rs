@@ -4,14 +4,22 @@
 //! `{prefix}` is a warehouse name (one warehouse = one IRC prefix); the
 //! `{namespace}` path parameter encodes multi-level namespaces with the
 //! `0x1F` unit separator (`%1F` in URLs) per the REST spec.
+//!
+//! Authorization (full mapping in the `crate::routes::grants` module
+//! docs): listing/reading namespaces needs `LIST_NAMESPACES` on the
+//! warehouse; creating needs `CREATE_NAMESPACE` on the warehouse; dropping
+//! and property updates need `MANAGE_NAMESPACE` on the namespace (or an
+//! ancestor, via hierarchy inheritance).
 
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
-use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::{Extension, Json};
 use meridian_common::MeridianError;
+use meridian_common::principal::Principal;
+use meridian_store::rbac::{Privilege, SecurableScope};
 use meridian_store::warehouse::WarehouseRecord;
 use meridian_store::{namespace, tenancy, warehouse};
 use serde::{Deserialize, Serialize};
@@ -20,7 +28,7 @@ use ulid::Ulid;
 
 use crate::AppState;
 use crate::error::ApiError;
-use crate::routes::ANONYMOUS_PRINCIPAL;
+use crate::routes::grants::{namespace_scope_chain, require};
 
 /// The multi-level namespace separator in URLs: the `0x1F` unit separator.
 const UNIT_SEPARATOR: char = '\u{1f}';
@@ -168,10 +176,18 @@ pub struct ListNamespacesResponse {
 /// (top-level namespaces when `parent` is absent).
 pub async fn list_namespaces(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path(prefix): Path<String>,
     Query(query): Query<ListNamespacesQuery>,
 ) -> Result<Json<ListNamespacesResponse>, ApiError> {
     let wh = resolve_warehouse(&state.pool, &prefix).await?;
+    require(
+        &state.pool,
+        &principal,
+        Privilege::ListNamespaces,
+        &SecurableScope::warehouse(&wh.id),
+    )
+    .await?;
 
     // Per the spec, an empty `parent` is treated as absent.
     let parent: Vec<String> = match query.parent.as_deref().filter(|p| !p.is_empty()) {
@@ -234,10 +250,18 @@ pub struct NamespaceResponse {
 /// `POST /{prefix}/namespaces` — create a namespace with optional properties.
 pub async fn create_namespace(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path(prefix): Path<String>,
     Json(request): Json<CreateNamespaceRequest>,
 ) -> Result<Json<NamespaceResponse>, ApiError> {
     let wh = resolve_warehouse(&state.pool, &prefix).await?;
+    require(
+        &state.pool,
+        &principal,
+        Privilege::CreateNamespace,
+        &SecurableScope::warehouse(&wh.id),
+    )
+    .await?;
     validate_levels(&request.namespace)?;
 
     let record = namespace::create(
@@ -246,7 +270,7 @@ pub async fn create_namespace(
         &wh.id,
         &request.namespace,
         request.properties,
-        ANONYMOUS_PRINCIPAL,
+        &principal.audit_string(),
     )
     .await
     .map_err(|e| match e {
@@ -264,9 +288,17 @@ pub async fn create_namespace(
 /// `GET /{prefix}/namespaces/{namespace}` — load namespace properties.
 pub async fn load_namespace(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((prefix, raw_namespace)): Path<(String, String)>,
 ) -> Result<Json<NamespaceResponse>, ApiError> {
     let wh = resolve_warehouse(&state.pool, &prefix).await?;
+    require(
+        &state.pool,
+        &principal,
+        Privilege::ListNamespaces,
+        &SecurableScope::warehouse(&wh.id),
+    )
+    .await?;
     let levels = decode_namespace_param(&raw_namespace)?;
 
     let record = namespace::get(&state.pool, &wh.id, &levels)
@@ -284,9 +316,17 @@ pub async fn load_namespace(
 /// `HEAD /{prefix}/namespaces/{namespace}` — existence check (204/404).
 pub async fn namespace_exists(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((prefix, raw_namespace)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     let wh = resolve_warehouse(&state.pool, &prefix).await?;
+    require(
+        &state.pool,
+        &principal,
+        Privilege::ListNamespaces,
+        &SecurableScope::warehouse(&wh.id),
+    )
+    .await?;
     let levels = decode_namespace_param(&raw_namespace)?;
 
     if namespace::get(&state.pool, &wh.id, &levels)
@@ -304,17 +344,26 @@ pub async fn namespace_exists(
 /// `DELETE /{prefix}/namespaces/{namespace}` — drop an empty namespace.
 pub async fn drop_namespace(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((prefix, raw_namespace)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     let wh = resolve_warehouse(&state.pool, &prefix).await?;
     let levels = decode_namespace_param(&raw_namespace)?;
+    let chain = namespace_scope_chain(&state.pool, &wh.id, &levels).await?;
+    require(
+        &state.pool,
+        &principal,
+        Privilege::ManageNamespace,
+        &SecurableScope::namespace(&wh.id, chain),
+    )
+    .await?;
 
     namespace::delete(
         &state.pool,
         tenancy::default_workspace_id(),
         &wh.id,
         &levels,
-        ANONYMOUS_PRINCIPAL,
+        &principal.audit_string(),
     )
     .await
     .map_err(|e| match e {
@@ -353,11 +402,20 @@ pub struct UpdateNamespacePropertiesResponse {
 /// a 422 `UnprocessableEntityException`.
 pub async fn update_namespace_properties(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((prefix, raw_namespace)): Path<(String, String)>,
     Json(request): Json<UpdateNamespacePropertiesRequest>,
 ) -> Result<Json<UpdateNamespacePropertiesResponse>, ApiError> {
     let wh = resolve_warehouse(&state.pool, &prefix).await?;
     let levels = decode_namespace_param(&raw_namespace)?;
+    let chain = namespace_scope_chain(&state.pool, &wh.id, &levels).await?;
+    require(
+        &state.pool,
+        &principal,
+        Privilege::ManageNamespace,
+        &SecurableScope::namespace(&wh.id, chain),
+    )
+    .await?;
 
     if let Some(key) = request
         .removals
@@ -376,7 +434,7 @@ pub async fn update_namespace_properties(
         &levels,
         request.updates,
         request.removals,
-        ANONYMOUS_PRINCIPAL,
+        &principal.audit_string(),
     )
     .await
     .map_err(|e| match e {

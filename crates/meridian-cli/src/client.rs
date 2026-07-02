@@ -38,6 +38,15 @@ fn http_client() -> Result<reqwest::Client, CliError> {
         .map_err(|e| CliError(format!("failed to build HTTP client: {e}")))
 }
 
+/// Attaches the optional bearer token (servers in `auth.mode = "oidc"`
+/// require one).
+fn with_token(request: reqwest::RequestBuilder, token: Option<&str>) -> reqwest::RequestBuilder {
+    match token {
+        Some(token) => request.bearer_auth(token),
+        None => request,
+    }
+}
+
 /// Normalizes the server base URL (strips a trailing slash).
 fn base(server: &str) -> &str {
     server.trim_end_matches('/')
@@ -168,6 +177,59 @@ pub(crate) async fn table_load(
 /// Joins namespace levels with the URL-encoded unit separator.
 fn encode_namespace(levels: &[String]) -> String {
     levels.join("%1F")
+}
+
+/// `GET /api/v2/roles`.
+pub(crate) async fn role_list(server: &str, token: Option<&str>) -> Result<Value, CliError> {
+    let request = http_client()?.get(format!("{}/api/v2/roles", base(server)));
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
+/// `POST /api/v2/roles`.
+pub(crate) async fn role_create(
+    server: &str,
+    token: Option<&str>,
+    name: &str,
+    description: Option<&str>,
+) -> Result<Value, CliError> {
+    let request = http_client()?
+        .post(format!("{}/api/v2/roles", base(server)))
+        .json(&json!({ "name": name, "description": description }));
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
+/// `POST /api/v2/grants`.
+pub(crate) async fn grant_add(
+    server: &str,
+    token: Option<&str>,
+    body: &Value,
+) -> Result<Value, CliError> {
+    let request = http_client()?
+        .post(format!("{}/api/v2/grants", base(server)))
+        .json(body);
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
+/// `GET /api/v2/grants`.
+pub(crate) async fn grant_list(server: &str, token: Option<&str>) -> Result<Value, CliError> {
+    let request = http_client()?.get(format!("{}/api/v2/grants", base(server)));
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
+/// `DELETE /api/v2/grants/{id}`.
+pub(crate) async fn grant_remove(
+    server: &str,
+    token: Option<&str>,
+    id: &str,
+) -> Result<(), CliError> {
+    let request = http_client()?.delete(format!("{}/api/v2/grants/{id}", base(server)));
+    let response = with_token(request, token).send().await?;
+    check(response).await?;
+    Ok(())
 }
 
 /// Renders rows as a plain aligned text table.

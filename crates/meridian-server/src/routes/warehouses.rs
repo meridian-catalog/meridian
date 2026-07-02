@@ -1,24 +1,31 @@
 //! Management API v0: warehouse CRUD under `/api/v2/warehouses`.
 //!
 //! A warehouse is a storage root plus non-secret storage options; its name
-//! doubles as the Iceberg REST `{prefix}`. This surface is pre-auth (M1):
-//! every mutation is audited under the anonymous principal until
-//! authentication lands.
+//! doubles as the Iceberg REST `{prefix}`. Mutations are audited under the
+//! caller's principal (from the request extensions; anonymous when
+//! authentication is disabled).
+//!
+//! Authorization (see `crate::routes::grants` for the full policy):
+//! creating and listing warehouses requires management access (the admin
+//! role or any `MANAGE_WAREHOUSE` grant); deleting a warehouse requires
+//! `MANAGE_WAREHOUSE` on that warehouse.
 
 use std::collections::BTreeMap;
 
-use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::{Extension, Json};
 use chrono::{DateTime, Utc};
 use meridian_common::MeridianError;
+use meridian_common::principal::Principal;
+use meridian_store::rbac::{Privilege, SecurableScope};
 use meridian_store::tenancy;
 use meridian_store::warehouse::{self, WarehouseRecord};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::error::ApiError;
-use crate::routes::ANONYMOUS_PRINCIPAL;
+use crate::routes::grants::{require, require_management};
 
 /// Longest accepted warehouse name.
 const MAX_NAME_LEN: usize = 100;
@@ -95,8 +102,10 @@ fn validate_name(name: &str) -> Result<(), ApiError> {
 /// `POST /api/v2/warehouses` — register a warehouse.
 pub async fn create_warehouse(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Json(request): Json<CreateWarehouseRequest>,
 ) -> Result<(StatusCode, Json<WarehouseResponse>), ApiError> {
+    require_management(&state.pool, &principal).await?;
     validate_name(&request.name)?;
     if request.storage_root.trim().is_empty() {
         return Err(ApiError::bad_request("storage_root must not be empty"));
@@ -108,7 +117,7 @@ pub async fn create_warehouse(
         &request.name,
         &request.storage_root,
         request.storage_options,
-        ANONYMOUS_PRINCIPAL,
+        &principal.audit_string(),
     )
     .await
     .map_err(|e| match e {
@@ -122,7 +131,9 @@ pub async fn create_warehouse(
 /// `GET /api/v2/warehouses` — list registered warehouses.
 pub async fn list_warehouses(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
 ) -> Result<Json<ListWarehousesResponse>, ApiError> {
+    require_management(&state.pool, &principal).await?;
     let warehouses = warehouse::list(&state.pool, tenancy::default_workspace_id())
         .await?
         .into_iter()
@@ -134,13 +145,25 @@ pub async fn list_warehouses(
 /// `DELETE /api/v2/warehouses/{name}` — delete an empty warehouse.
 pub async fn delete_warehouse(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let wh = warehouse::get_by_name(&state.pool, tenancy::default_workspace_id(), &name)
+        .await?
+        .ok_or_else(|| ApiError::no_such_warehouse(&name))?;
+    require(
+        &state.pool,
+        &principal,
+        Privilege::ManageWarehouse,
+        &SecurableScope::warehouse(&wh.id),
+    )
+    .await?;
+
     warehouse::delete_by_name(
         &state.pool,
         tenancy::default_workspace_id(),
         &name,
-        ANONYMOUS_PRINCIPAL,
+        &principal.audit_string(),
     )
     .await
     .map_err(|e| match e {

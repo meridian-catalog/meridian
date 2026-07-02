@@ -56,6 +56,112 @@ enum Command {
     /// Inspect tables on a running server.
     #[command(subcommand)]
     Table(TableCommand),
+
+    /// Manage RBAC roles on a running server.
+    #[command(subcommand)]
+    Role(RoleCommand),
+
+    /// Manage RBAC grants on a running server.
+    #[command(subcommand)]
+    Grant(GrantCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum RoleCommand {
+    /// List roles.
+    List {
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// Create a role.
+    Create {
+        /// Role name.
+        #[arg(value_name = "NAME")]
+        name: String,
+
+        /// Optional human description.
+        #[arg(long)]
+        description: Option<String>,
+
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum GrantCommand {
+    /// Create a grant: a privilege on a securable for a role or principal.
+    Add {
+        /// Privilege to grant, e.g. READ, COMMIT, `CREATE_TABLE`.
+        #[arg(long, value_name = "PRIVILEGE")]
+        privilege: String,
+
+        /// Grantee role name (exactly one of --role / --principal).
+        #[arg(long, value_name = "NAME")]
+        role: Option<String>,
+
+        /// Grantee principal id (exactly one of --role / --principal).
+        #[arg(long, value_name = "PRINCIPAL_ID")]
+        principal: Option<String>,
+
+        /// Warehouse the securable lives in (the securable itself when
+        /// neither --namespace nor --table is given).
+        #[arg(long)]
+        warehouse: String,
+
+        /// Namespace (dot-separated); the securable when --table is absent.
+        #[arg(long, value_name = "NAMESPACE")]
+        namespace: Option<String>,
+
+        /// Table name; makes the securable a table (requires --namespace).
+        #[arg(long, value_name = "TABLE")]
+        table: Option<String>,
+
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// List grants.
+    List {
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// Delete a grant by id.
+    Rm {
+        /// Grant id (from `meridian grant list`).
+        #[arg(value_name = "GRANT_ID")]
+        id: String,
+
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -167,6 +273,8 @@ fn main() -> ExitCode {
         Command::Warehouse(command) => run_async(run_warehouse(command)),
         Command::Namespace(command) => run_async(run_namespace(command)),
         Command::Table(command) => run_async(run_table(command)),
+        Command::Role(command) => run_async(run_role(command)),
+        Command::Grant(command) => run_async(run_grant(command)),
     };
 
     match result {
@@ -390,6 +498,139 @@ async fn run_table(command: TableCommand) -> Result<(), CliError> {
     }
 }
 
+async fn run_role(command: RoleCommand) -> Result<(), CliError> {
+    match command {
+        RoleCommand::List { server, token } => {
+            let body = client::role_list(&server, token.as_deref()).await?;
+            let roles = body
+                .get("roles")
+                .and_then(Value::as_array)
+                .ok_or_else(|| CliError("malformed response: missing roles".to_owned()))?;
+            let rows: Vec<Vec<String>> = roles
+                .iter()
+                .map(|role| {
+                    vec![
+                        role.get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("?")
+                            .to_owned(),
+                        if role.get("built_in").and_then(Value::as_bool) == Some(true) {
+                            "yes".to_owned()
+                        } else {
+                            "no".to_owned()
+                        },
+                        role.get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or("-")
+                            .to_owned(),
+                    ]
+                })
+                .collect();
+            print!(
+                "{}",
+                client::render_table(&["NAME", "BUILT-IN", "DESCRIPTION"], &rows)
+            );
+            Ok(())
+        }
+        RoleCommand::Create {
+            name,
+            description,
+            server,
+            token,
+        } => {
+            let created =
+                client::role_create(&server, token.as_deref(), &name, description.as_deref())
+                    .await?;
+            let id = created.get("id").and_then(Value::as_str).unwrap_or("?");
+            println!("created role {name} (id {id})");
+            Ok(())
+        }
+    }
+}
+
+async fn run_grant(command: GrantCommand) -> Result<(), CliError> {
+    match command {
+        GrantCommand::Add {
+            privilege,
+            role,
+            principal,
+            warehouse,
+            namespace,
+            table,
+            server,
+            token,
+        } => {
+            let securable_type = match (&namespace, &table) {
+                (None, None) => "warehouse",
+                (Some(_), None) => "namespace",
+                (Some(_), Some(_)) => "table",
+                (None, Some(_)) => {
+                    return Err(CliError("--table requires --namespace".to_owned()));
+                }
+            };
+            let namespace_levels = namespace.as_deref().map(parse_namespace_arg).transpose()?;
+            let body = serde_json::json!({
+                "privilege": privilege,
+                "role": role,
+                "principal_id": principal,
+                "securable": {
+                    "type": securable_type,
+                    "warehouse": warehouse,
+                    "namespace": namespace_levels,
+                    "table": table,
+                },
+            });
+            let created = client::grant_add(&server, token.as_deref(), &body).await?;
+            let id = created.get("id").and_then(Value::as_str).unwrap_or("?");
+            println!("created grant {id}");
+            Ok(())
+        }
+        GrantCommand::List { server, token } => {
+            let body = client::grant_list(&server, token.as_deref()).await?;
+            let grants = body
+                .get("grants")
+                .and_then(Value::as_array)
+                .ok_or_else(|| CliError("malformed response: missing grants".to_owned()))?;
+            let field = |grant: &Value, key: &str| {
+                grant
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or("-")
+                    .to_owned()
+            };
+            let rows: Vec<Vec<String>> = grants
+                .iter()
+                .map(|grant| {
+                    let grantee = grant.get("role").and_then(Value::as_str).map_or_else(
+                        || format!("principal:{}", field(grant, "principal_id")),
+                        |role| format!("role:{role}"),
+                    );
+                    vec![
+                        field(grant, "id"),
+                        field(grant, "privilege"),
+                        grantee,
+                        field(grant, "securable_type"),
+                        field(grant, "securable_id"),
+                    ]
+                })
+                .collect();
+            print!(
+                "{}",
+                client::render_table(
+                    &["ID", "PRIVILEGE", "GRANTEE", "SECURABLE", "SECURABLE ID"],
+                    &rows
+                )
+            );
+            Ok(())
+        }
+        GrantCommand::Rm { id, server, token } => {
+            client::grant_remove(&server, token.as_deref(), &id).await?;
+            println!("deleted grant {id}");
+            Ok(())
+        }
+    }
+}
+
 /// Renders a scalar JSON value without quotes; non-scalars fall back to
 /// compact JSON.
 fn render_scalar(value: &Value) -> String {
@@ -422,6 +663,19 @@ fn run_serve(all_in_one: bool, config_path: Option<&std::path::Path>) -> Result<
             .await
             .map_err(|e| MeridianError::internal("database migration failed", e))?;
         tracing::info!("database migrations up to date");
+
+        // Bootstrap the first administrator (idempotent): grants the
+        // built-in admin role to the configured identity so a
+        // deny-by-default oidc deployment has a way in.
+        if let Some(bootstrap) = &config.auth.bootstrap_admin {
+            meridian_store::rbac::bootstrap_admin(
+                &pool,
+                meridian_store::tenancy::default_workspace_id(),
+                &bootstrap.issuer,
+                &bootstrap.subject,
+            )
+            .await?;
+        }
 
         meridian_server::serve(config, pool).await
     })
