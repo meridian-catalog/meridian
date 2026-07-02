@@ -271,11 +271,22 @@ async fn config_resolves_warehouse_to_prefix_on_both_mounts() {
                 "endpoints must list the table surface ({table_endpoint}): {body}"
             );
         }
-        // Only implemented endpoints may be advertised: views are not.
+        // Only implemented endpoints may be advertised: the view surface
+        // is implemented, register-view is not.
+        for view_endpoint in [
+            "GET /v1/{prefix}/namespaces/{namespace}/views",
+            "POST /v1/{prefix}/namespaces/{namespace}/views/{view}",
+            "POST /v1/{prefix}/views/rename",
+        ] {
+            assert!(
+                endpoints.contains(&json!(view_endpoint)),
+                "endpoints must list the view surface ({view_endpoint}): {body}"
+            );
+        }
         assert!(
             !endpoints
                 .iter()
-                .any(|e| e.as_str().is_some_and(|s| s.contains("/views"))),
+                .any(|e| e.as_str().is_some_and(|s| s.contains("register-view"))),
             "only implemented endpoints may be advertised: {body}"
         );
     }

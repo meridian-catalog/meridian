@@ -12,6 +12,16 @@ releases begin, the project will adhere to
 
 ### Added
 
+- **RBAC enforcement on the view surface and principal listing**: views
+  are now a first-class grant securable (`securable_type = "view"`, with
+  the same hierarchy inheritance as tables), and every view endpoint
+  enforces authorization in `oidc` mode — list → `LIST_TABLES`, create →
+  `CREATE_VIEW`, load/exists → `READ`, replace → `COMMIT`, drop → `DROP`,
+  rename → `WRITE` (source view) + `CREATE_VIEW` (destination namespace).
+  `GET /api/v2/principals` now requires management access (admin or
+  `MANAGE_WAREHOUSE`), closing an identity-enumeration gap. Previously the
+  view endpoints performed no authorization checks at all in `oidc` mode.
+  Full mapping: [docs/api-status.md](docs/api-status.md#authorization-rbac).
 - **Iceberg REST Catalog surface**, mounted at both `/v1` and `/iceberg/v1`,
   with `{prefix}` resolving to a named warehouse: `config` (with
   warehouse-to-prefix resolution and an advertised `endpoints` list), the
@@ -37,6 +47,27 @@ releases begin, the project will adhere to
 - **Object storage IO** over OpenDAL: local filesystem and S3 backends with
   conditional (if-not-exists) metadata writes.
 - **Warehouse management API** (`/api/v2/warehouses`): create, list, delete.
+- **OIDC authentication** (`auth.mode = "oidc"`, default `disabled` with a
+  loud startup warning): validates bearer tokens from configured external
+  identity providers (RS256/ES256 family, JWKS discovery and rotation-aware
+  caching, exp/nbf/iss/aud checks), distinguishes user vs. service
+  principals for audit, JIT-provisions a local `principals` row per
+  identity, and keeps `/healthz`/`/readyz` open so liveness never depends
+  on the IdP. Principal visibility via `GET /api/v2/principals`. Details:
+  [docs/api-status.md](docs/api-status.md#authentication).
+- **Iceberg REST view surface**: the full view lifecycle on both mounts —
+  list (paginated), create (multi-dialect SQL representations, validated by
+  a typed view-metadata builder for the view spec's format version 1),
+  load, exists, replace (`assert-view-uuid` + compare-and-swap pointer
+  commit with bounded retry, audit + outbox in the swap transaction), drop,
+  and rename. Tables and views share one name space per namespace (enforced
+  from the view side; remaining table-side gap documented). Status and
+  divergences: [docs/api-status.md](docs/api-status.md#views).
+- **Storage config passthrough**: `LoadTableResult.config` and
+  `LoadViewResult.config` now carry the warehouse's non-secret storage
+  options under Iceberg client property names (`s3.endpoint`,
+  `s3.region`/`client.region`, `s3.path-style-access`). Credential material
+  is never forwarded — enforced by an explicit denylist and leak tests.
 - **`meridian` CLI**: `serve` (migrate + serve) plus `warehouse`,
   `namespace`, and `table` admin subcommands against a running server;
   layered configuration (defaults < `meridian.toml` < `DATABASE_URL` <
@@ -52,8 +83,10 @@ releases begin, the project will adhere to
 
 ### Security
 
-- **There is no authentication or authorization yet.** Every endpoint,
-  including warehouse management, is open to anyone who can reach the port.
-  Do not expose Meridian to untrusted networks. OIDC authentication is the
-  next milestone; see the warning in
-  [docs/api-status.md](docs/api-status.md).
+- **Authentication and authorization are off by default.** With the
+  default `auth.mode = "disabled"`, every endpoint — including warehouse
+  and RBAC management — is open to anyone who can reach the port, and
+  authorization is bypassed entirely. Do not expose a disabled-mode server
+  to untrusted networks. With `auth.mode = "oidc"`, access is
+  deny-by-default RBAC across the namespace, table, and view surfaces; see
+  the warning in [docs/api-status.md](docs/api-status.md).
