@@ -1,0 +1,9 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    # NOTE: placeholder org/repo path — update this URL at launch if the
+    # org or repository name changes.
+    url: https://github.com/meridian-catalog/meridian/security/advisories/new
+    about: >-
+      Please report security vulnerabilities privately via GitHub security
+      advisories, not public issues. See SECURITY.md for details.

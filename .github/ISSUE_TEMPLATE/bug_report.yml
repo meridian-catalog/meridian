@@ -1,0 +1,85 @@
+name: Bug report
+description: Report a defect in Meridian
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please fill in as much detail
+        as you can — it makes triage and fixing much faster.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: A clear description of the bug you observed.
+      placeholder: Describe the actual behavior, including any error messages.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: What you expected to happen instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction-steps
+    attributes:
+      label: Reproduction steps
+      description: Minimal, ordered steps to reproduce the issue.
+      placeholder: |
+        1. Start the catalog with ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: The Meridian version or git commit SHA you are running.
+      placeholder: e.g. 0.1.0 or a1b2c3d
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: >-
+        Deployment mode (e.g. single binary, Docker, Kubernetes/Helm), operating
+        system, and the query engine(s) involved (e.g. Spark, Trino, DuckDB),
+        including their versions.
+      placeholder: |
+        Deployment mode:
+        OS:
+        Engine(s) involved:
+        PostgreSQL version:
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: >-
+        Paste relevant log output. Please redact any credentials, tokens, or
+        other sensitive values before posting.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: not-security-sensitive
+    attributes:
+      label: Security check
+      description: >-
+        Security vulnerabilities must not be reported in public issues. Please
+        follow the process in SECURITY.md instead.
+      options:
+        - label: This issue is not security-sensitive. (If it is, report it via the process in SECURITY.md instead.)
+          required: true
