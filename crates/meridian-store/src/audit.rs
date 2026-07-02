@@ -81,11 +81,12 @@ pub fn canonical_json(value: &Value) -> String {
 
 fn write_canonical(value: &Value, out: &mut String) {
     match value {
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
-            // Leaf rendering delegates to serde_json for correct escaping
-            // and number formatting. Infallible for these variants.
-            out.push_str(&serde_json::to_string(value).expect("leaf JSON serialization"));
-        }
+        Value::Null => out.push_str("null"),
+        Value::Bool(true) => out.push_str("true"),
+        Value::Bool(false) => out.push_str("false"),
+        // `serde_json::Number`'s `Display` renders exactly its JSON form.
+        Value::Number(number) => out.push_str(&number.to_string()),
+        Value::String(s) => write_escaped_string(s, out),
         Value::Array(items) => {
             out.push('[');
             for (i, item) in items.iter().enumerate() {
@@ -104,13 +105,43 @@ fn write_canonical(value: &Value, out: &mut String) {
                 if i > 0 {
                     out.push(',');
                 }
-                out.push_str(&serde_json::to_string(key).expect("JSON key serialization"));
+                write_escaped_string(key, out);
                 out.push(':');
                 write_canonical(&map[*key], out);
             }
             out.push('}');
         }
     }
+}
+
+/// JSON string escaping per RFC 8259 §7, byte-identical to `serde_json`'s
+/// default output: `"` and `\` escaped, control characters below U+0020
+/// escaped (short forms for backspace/tab/newline/form-feed/carriage-return,
+/// lowercase `\u00xx` otherwise), everything else — including non-ASCII —
+/// verbatim. Hashing must be a total function, so this replaces a fallible
+/// serializer call on the commit path; equivalence with `serde_json` is
+/// locked by a property test in this module.
+fn write_escaped_string(s: &str, out: &mut String) {
+    use std::fmt::Write as _;
+
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{08}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{0C}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 => {
+                // Infallible: `write!` into a String cannot fail.
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
 }
 
 /// Computes an entry hash: `sha256(prev_hash || canonical)` hex-encoded.
@@ -287,6 +318,40 @@ pub async fn verify_chain(pool: &PgPool) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    proptest::proptest! {
+        /// The hand-rolled leaf rendering must stay byte-identical to
+        /// serde_json's default output — strings (escaping), integers,
+        /// floats, and keys all go through it.
+        #[test]
+        fn escaping_matches_serde_json_for_arbitrary_strings(s in "\\PC*|[\\x00-\\x1f\"\\\\]{0,64}") {
+            let ours = canonical_json(&Value::String(s.clone()));
+            let serde = serde_json::to_string(&Value::String(s)).unwrap();
+            proptest::prop_assert_eq!(ours, serde);
+        }
+
+        #[test]
+        fn numbers_match_serde_json(i in proptest::num::i64::ANY, f in proptest::num::f64::NORMAL) {
+            let ours_i = canonical_json(&json!(i));
+            proptest::prop_assert_eq!(ours_i, serde_json::to_string(&json!(i)).unwrap());
+            let ours_f = canonical_json(&json!(f));
+            proptest::prop_assert_eq!(ours_f, serde_json::to_string(&json!(f)).unwrap());
+        }
+    }
+
+    #[test]
+    fn canonical_json_escapes_control_chars_like_serde_json() {
+        // Every control char plus DEL (which must NOT be escaped).
+        let nasty: String = (0u8..0x21)
+            .map(char::from)
+            .chain(['\u{7f}', 'é', '🦀'])
+            .collect();
+        let value = Value::String(nasty);
+        assert_eq!(
+            canonical_json(&value),
+            serde_json::to_string(&value).unwrap()
+        );
+    }
 
     #[test]
     fn canonical_json_sorts_keys_recursively() {
