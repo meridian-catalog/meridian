@@ -7,6 +7,7 @@
 pub mod config;
 pub mod error;
 pub mod id;
+pub mod principal;
 pub mod telemetry;
 
 pub use config::AppConfig;
