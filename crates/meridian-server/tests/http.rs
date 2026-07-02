@@ -95,21 +95,24 @@ async fn iceberg_config_returns_spec_shape_on_both_paths() {
         return;
     };
 
-    let expected = serde_json::json!({"defaults": {}, "overrides": {}});
+    for uri in ["/v1/config", "/iceberg/v1/config"] {
+        let (status, body) = get_json(router.clone(), uri).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["defaults"], serde_json::json!({}));
+        assert_eq!(body["overrides"], serde_json::json!({}));
+        assert!(
+            body["endpoints"]
+                .as_array()
+                .is_some_and(|endpoints| !endpoints.is_empty()),
+            "config must advertise the implemented endpoints: {body}"
+        );
+    }
 
-    let (status, body) = get_json(router.clone(), "/v1/config").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, expected);
-
-    let (status, body) = get_json(router.clone(), "/iceberg/v1/config").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, expected);
-
-    // The warehouse parameter is accepted (not rejected) even though it does
-    // not affect the response yet.
-    let (status, body) = get_json(router, "/v1/config?warehouse=s3://bucket/wh").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, expected);
+    // An unknown warehouse parameter is a 404 per the spec (warehouse
+    // resolution itself is covered in tests/api.rs).
+    let (status, body) = get_json(router, "/v1/config?warehouse=no-such-warehouse").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["type"], "NoSuchWarehouseException");
 }
 
 #[tokio::test]
@@ -191,7 +194,9 @@ async fn served_over_real_tcp() {
         .nth(1)
         .expect("response has a body section");
     let value: Value = serde_json::from_str(body.trim()).expect("body is JSON");
-    assert_eq!(value, serde_json::json!({"defaults": {}, "overrides": {}}));
+    assert_eq!(value["defaults"], serde_json::json!({}));
+    assert_eq!(value["overrides"], serde_json::json!({}));
+    assert!(value["endpoints"].is_array());
 
     server.abort();
 }

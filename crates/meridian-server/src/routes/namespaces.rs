@@ -1,0 +1,362 @@
+//! Iceberg REST catalog namespace endpoints.
+//!
+//! Mounted under both `/iceberg/v1/{prefix}` and `/v1/{prefix}`. The
+//! `{prefix}` is a warehouse name (one warehouse = one IRC prefix); the
+//! `{namespace}` path parameter encodes multi-level namespaces with the
+//! `0x1F` unit separator (`%1F` in URLs) per the REST spec.
+
+use std::collections::BTreeMap;
+use std::str::FromStr;
+
+use axum::Json;
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use meridian_common::MeridianError;
+use meridian_store::warehouse::WarehouseRecord;
+use meridian_store::{namespace, tenancy, warehouse};
+use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
+use ulid::Ulid;
+
+use crate::AppState;
+use crate::error::ApiError;
+use crate::routes::ANONYMOUS_PRINCIPAL;
+
+/// The multi-level namespace separator in URLs: the `0x1F` unit separator.
+const UNIT_SEPARATOR: char = '\u{1f}';
+
+/// Page size used when a client paginates without an explicit `pageSize`.
+const DEFAULT_PAGE_SIZE: i64 = 100;
+
+/// Hard upper bound on a single page.
+const MAX_PAGE_SIZE: i64 = 1000;
+
+/// Resolves an IRC `{prefix}` (a warehouse name) to its warehouse, or 404
+/// `NoSuchWarehouseException`.
+pub(crate) async fn resolve_warehouse(
+    pool: &PgPool,
+    prefix: &str,
+) -> Result<WarehouseRecord, ApiError> {
+    warehouse::get_by_name(pool, tenancy::default_workspace_id(), prefix)
+        .await?
+        .ok_or_else(|| ApiError::no_such_warehouse(prefix))
+}
+
+/// Validates namespace levels: at least one level, no empty level, no level
+/// containing the unit separator (it could never be addressed in a URL).
+fn validate_levels(levels: &[String]) -> Result<(), ApiError> {
+    if levels.is_empty() {
+        return Err(ApiError::bad_request(
+            "namespace must have at least one level",
+        ));
+    }
+    for level in levels {
+        if level.is_empty() {
+            return Err(ApiError::bad_request("namespace levels must be non-empty"));
+        }
+        if level.contains(UNIT_SEPARATOR) {
+            return Err(ApiError::bad_request(
+                "namespace levels must not contain the 0x1F unit separator",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Decodes a `{namespace}` path parameter (or `parent` query parameter) into
+/// levels by splitting on the unit separator.
+fn decode_namespace_param(raw: &str) -> Result<Vec<String>, ApiError> {
+    let levels: Vec<String> = raw.split(UNIT_SEPARATOR).map(str::to_owned).collect();
+    validate_levels(&levels)?;
+    Ok(levels)
+}
+
+/// Encodes/decodes the opaque pagination token.
+///
+/// The token is the hex rendering of the last row's ULID — opaque to
+/// clients, cheap to verify, and stable under concurrent inserts (keyset
+/// pagination never skips or repeats rows that existed when their page was
+/// read).
+fn encode_page_token(last_id: &str) -> String {
+    hex::encode(last_id.as_bytes())
+}
+
+fn decode_page_token(token: &str) -> Result<String, ApiError> {
+    let invalid = || ApiError::bad_request("invalid pageToken");
+    let bytes = hex::decode(token).map_err(|_| invalid())?;
+    let id = String::from_utf8(bytes).map_err(|_| invalid())?;
+    Ulid::from_str(&id).map_err(|_| invalid())?;
+    Ok(id)
+}
+
+/// Query parameters for `GET /{prefix}/namespaces`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListNamespacesQuery {
+    /// Optional parent namespace to list underneath (unit-separator encoded).
+    pub parent: Option<String>,
+    /// Opaque continuation token from a previous response.
+    pub page_token: Option<String>,
+    /// Upper bound on the number of results.
+    pub page_size: Option<i64>,
+}
+
+/// `ListNamespacesResponse` from the IRC spec.
+#[derive(Debug, Serialize)]
+pub struct ListNamespacesResponse {
+    /// Namespaces at the requested level.
+    pub namespaces: Vec<Vec<String>>,
+    /// Continuation token; `null` signals the end of the listing.
+    #[serde(rename = "next-page-token")]
+    pub next_page_token: Option<String>,
+}
+
+/// `GET /{prefix}/namespaces` — list namespaces one level below `parent`
+/// (top-level namespaces when `parent` is absent).
+pub async fn list_namespaces(
+    State(state): State<AppState>,
+    Path(prefix): Path<String>,
+    Query(query): Query<ListNamespacesQuery>,
+) -> Result<Json<ListNamespacesResponse>, ApiError> {
+    let wh = resolve_warehouse(&state.pool, &prefix).await?;
+
+    // Per the spec, an empty `parent` is treated as absent.
+    let parent: Vec<String> = match query.parent.as_deref().filter(|p| !p.is_empty()) {
+        Some(raw) => {
+            let levels = decode_namespace_param(raw)?;
+            if namespace::get(&state.pool, &wh.id, &levels)
+                .await?
+                .is_none()
+            {
+                return Err(ApiError::no_such_namespace(format!(
+                    "parent namespace {:?} does not exist",
+                    levels.join(".")
+                )));
+            }
+            levels
+        }
+        None => Vec::new(),
+    };
+
+    // Pagination engages when the client signals it (a pageToken — possibly
+    // empty — or a pageSize). Otherwise the spec requires all results in one
+    // response with a null next-page-token.
+    let paginating = query.page_token.is_some() || query.page_size.is_some();
+    let (limit, after_id) = if paginating {
+        let size = query.page_size.unwrap_or(DEFAULT_PAGE_SIZE);
+        if size < 1 {
+            return Err(ApiError::bad_request("pageSize must be at least 1"));
+        }
+        let size = size.min(MAX_PAGE_SIZE);
+        let after = match query.page_token.as_deref().filter(|t| !t.is_empty()) {
+            Some(token) => Some(decode_page_token(token)?),
+            None => None,
+        };
+        (Some(size), after)
+    } else {
+        (None, None)
+    };
+
+    // Fetch one extra row to learn whether another page exists.
+    let fetch_limit = limit.map(|l| l + 1);
+    let mut rows = namespace::list(
+        &state.pool,
+        &wh.id,
+        &parent,
+        after_id.as_deref(),
+        fetch_limit,
+    )
+    .await?;
+
+    let next_page_token = match limit {
+        Some(size) if rows.len() > usize::try_from(size).unwrap_or(usize::MAX) => {
+            rows.truncate(usize::try_from(size).unwrap_or(usize::MAX));
+            rows.last().map(|r| encode_page_token(&r.id))
+        }
+        _ => None,
+    };
+
+    Ok(Json(ListNamespacesResponse {
+        namespaces: rows.into_iter().map(|r| r.levels).collect(),
+        next_page_token,
+    }))
+}
+
+/// `CreateNamespaceRequest` from the IRC spec.
+#[derive(Debug, Deserialize)]
+pub struct CreateNamespaceRequest {
+    /// Namespace levels, outermost first.
+    pub namespace: Vec<String>,
+    /// Initial string properties.
+    #[serde(default)]
+    pub properties: BTreeMap<String, String>,
+}
+
+/// `CreateNamespaceResponse` / `GetNamespaceResponse` shape.
+#[derive(Debug, Serialize)]
+pub struct NamespaceResponse {
+    /// Namespace levels, outermost first.
+    pub namespace: Vec<String>,
+    /// Stored string properties.
+    pub properties: BTreeMap<String, String>,
+}
+
+/// `POST /{prefix}/namespaces` — create a namespace with optional properties.
+pub async fn create_namespace(
+    State(state): State<AppState>,
+    Path(prefix): Path<String>,
+    Json(request): Json<CreateNamespaceRequest>,
+) -> Result<Json<NamespaceResponse>, ApiError> {
+    let wh = resolve_warehouse(&state.pool, &prefix).await?;
+    validate_levels(&request.namespace)?;
+
+    let record = namespace::create(
+        &state.pool,
+        tenancy::default_workspace_id(),
+        &wh.id,
+        &request.namespace,
+        request.properties,
+        ANONYMOUS_PRINCIPAL,
+    )
+    .await
+    .map_err(|e| match e {
+        MeridianError::Conflict(message) => ApiError::already_exists(message),
+        MeridianError::NotFound(message) => ApiError::no_such_namespace(message),
+        other => ApiError::from(other),
+    })?;
+
+    Ok(Json(NamespaceResponse {
+        namespace: record.levels,
+        properties: record.properties.0,
+    }))
+}
+
+/// `GET /{prefix}/namespaces/{namespace}` — load namespace properties.
+pub async fn load_namespace(
+    State(state): State<AppState>,
+    Path((prefix, raw_namespace)): Path<(String, String)>,
+) -> Result<Json<NamespaceResponse>, ApiError> {
+    let wh = resolve_warehouse(&state.pool, &prefix).await?;
+    let levels = decode_namespace_param(&raw_namespace)?;
+
+    let record = namespace::get(&state.pool, &wh.id, &levels)
+        .await?
+        .ok_or_else(|| {
+            ApiError::no_such_namespace(format!("namespace {:?} does not exist", levels.join(".")))
+        })?;
+
+    Ok(Json(NamespaceResponse {
+        namespace: record.levels,
+        properties: record.properties.0,
+    }))
+}
+
+/// `HEAD /{prefix}/namespaces/{namespace}` — existence check (204/404).
+pub async fn namespace_exists(
+    State(state): State<AppState>,
+    Path((prefix, raw_namespace)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let wh = resolve_warehouse(&state.pool, &prefix).await?;
+    let levels = decode_namespace_param(&raw_namespace)?;
+
+    if namespace::get(&state.pool, &wh.id, &levels)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::no_such_namespace(format!(
+            "namespace {:?} does not exist",
+            levels.join(".")
+        )));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /{prefix}/namespaces/{namespace}` — drop an empty namespace.
+pub async fn drop_namespace(
+    State(state): State<AppState>,
+    Path((prefix, raw_namespace)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let wh = resolve_warehouse(&state.pool, &prefix).await?;
+    let levels = decode_namespace_param(&raw_namespace)?;
+
+    namespace::delete(
+        &state.pool,
+        tenancy::default_workspace_id(),
+        &wh.id,
+        &levels,
+        ANONYMOUS_PRINCIPAL,
+    )
+    .await
+    .map_err(|e| match e {
+        MeridianError::NotFound(message) => ApiError::no_such_namespace(message),
+        MeridianError::Conflict(message) => ApiError::namespace_not_empty(message),
+        other => ApiError::from(other),
+    })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `UpdateNamespacePropertiesRequest` from the IRC spec.
+#[derive(Debug, Deserialize)]
+pub struct UpdateNamespacePropertiesRequest {
+    /// Property keys to remove.
+    #[serde(default)]
+    pub removals: Vec<String>,
+    /// Property keys to set.
+    #[serde(default)]
+    pub updates: BTreeMap<String, String>,
+}
+
+/// `UpdateNamespacePropertiesResponse` from the IRC spec.
+#[derive(Debug, Serialize)]
+pub struct UpdateNamespacePropertiesResponse {
+    /// Keys added or updated.
+    pub updated: Vec<String>,
+    /// Keys removed.
+    pub removed: Vec<String>,
+    /// Keys requested for removal that were not present.
+    pub missing: Vec<String>,
+}
+
+/// `POST /{prefix}/namespaces/{namespace}/properties` — set and/or remove
+/// properties atomically. A key present in both `updates` and `removals` is
+/// a 422 `UnprocessableEntityException`.
+pub async fn update_namespace_properties(
+    State(state): State<AppState>,
+    Path((prefix, raw_namespace)): Path<(String, String)>,
+    Json(request): Json<UpdateNamespacePropertiesRequest>,
+) -> Result<Json<UpdateNamespacePropertiesResponse>, ApiError> {
+    let wh = resolve_warehouse(&state.pool, &prefix).await?;
+    let levels = decode_namespace_param(&raw_namespace)?;
+
+    if let Some(key) = request
+        .removals
+        .iter()
+        .find(|k| request.updates.contains_key(*k))
+    {
+        return Err(ApiError::unprocessable(format!(
+            "property key {key:?} is present in both updates and removals"
+        )));
+    }
+
+    let outcome = namespace::update_properties(
+        &state.pool,
+        tenancy::default_workspace_id(),
+        &wh.id,
+        &levels,
+        request.updates,
+        request.removals,
+        ANONYMOUS_PRINCIPAL,
+    )
+    .await
+    .map_err(|e| match e {
+        MeridianError::NotFound(message) => ApiError::no_such_namespace(message),
+        other => ApiError::from(other),
+    })?;
+
+    Ok(Json(UpdateNamespacePropertiesResponse {
+        updated: outcome.updated,
+        removed: outcome.removed,
+        missing: outcome.missing,
+    }))
+}

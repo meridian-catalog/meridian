@@ -9,6 +9,8 @@ rust-version.workspace = true
 
 [dependencies]
 axum = { workspace = true }
+chrono = { workspace = true }
+hex = { workspace = true }
 http = { workspace = true }
 meridian-common = { workspace = true }
 meridian-store = { workspace = true }

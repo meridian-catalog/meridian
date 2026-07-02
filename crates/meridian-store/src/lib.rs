@@ -6,8 +6,11 @@
 //! database; compile-time checking may be revisited once the schema settles.
 
 pub mod audit;
+pub mod namespace;
 pub mod outbox;
 pub mod pool;
+pub mod tenancy;
+pub mod warehouse;
 
 pub use pool::{connect, health_check};
 

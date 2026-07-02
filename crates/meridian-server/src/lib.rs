@@ -7,7 +7,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::extract::Request;
 use axum::http::{HeaderValue, StatusCode};
-use axum::routing::get;
+use axum::routing::{delete, get, post};
 use meridian_common::{AppConfig, MeridianError, Result};
 use sqlx::PgPool;
 use tokio::net::TcpListener;
@@ -20,6 +20,7 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 use ulid::Ulid;
 
+pub mod error;
 pub mod routes;
 
 /// Shared state available to all handlers.
@@ -49,13 +50,45 @@ pub fn build_router(state: AppState) -> Router {
     let request_timeout = Duration::from_secs(server.request_timeout_secs);
     let max_body_bytes = server.max_body_bytes;
 
+    // The Iceberg REST surface, mounted both at the spec path prefix
+    // (/iceberg/v1) and at the bare /v1 alias many clients default to.
+    // {prefix} is a warehouse name; static segments (/v1/config) win over
+    // the {prefix} capture in axum's router, so "config" is not a usable
+    // warehouse prefix at the /config path itself.
+    let iceberg = Router::new()
+        .route("/config", get(routes::iceberg::get_config))
+        .route(
+            "/{prefix}/namespaces",
+            get(routes::namespaces::list_namespaces).post(routes::namespaces::create_namespace),
+        )
+        .route(
+            "/{prefix}/namespaces/{namespace}",
+            get(routes::namespaces::load_namespace)
+                .head(routes::namespaces::namespace_exists)
+                .delete(routes::namespaces::drop_namespace),
+        )
+        .route(
+            "/{prefix}/namespaces/{namespace}/properties",
+            post(routes::namespaces::update_namespace_properties),
+        )
+        // Nested routers do not inherit the outer fallbacks, so the IRC
+        // error envelope for wrong methods must be installed here as well.
+        .method_not_allowed_fallback(method_not_allowed);
+
     let routes = Router::new()
         .route("/healthz", get(routes::health::healthz))
         .route("/readyz", get(routes::health::readyz))
-        // The Iceberg REST config endpoint, both at the spec path prefix and
-        // at the bare /v1 alias many clients default to.
-        .route("/iceberg/v1/config", get(routes::iceberg::get_config))
-        .route("/v1/config", get(routes::iceberg::get_config))
+        .nest("/iceberg/v1", iceberg.clone())
+        .nest("/v1", iceberg)
+        // Management API v0 (pre-auth).
+        .route(
+            "/api/v2/warehouses",
+            get(routes::warehouses::list_warehouses).post(routes::warehouses::create_warehouse),
+        )
+        .route(
+            "/api/v2/warehouses/{name}",
+            delete(routes::warehouses::delete_warehouse),
+        )
         // Unmatched routes and wrong methods must still speak the IRC error
         // envelope — engines parse error bodies, not just status codes.
         .fallback(route_not_found)

@@ -145,27 +145,49 @@ fn entry_content(
     }))
 }
 
-/// Appends an entry to the audit chain and returns the persisted record.
+/// Appends an entry to the audit chain in its own transaction and returns
+/// the persisted record.
 ///
-/// Runs in its own transaction. TODO(M1): also expose a variant that joins
-/// an existing transaction so commit-path mutations, their audit row, and
-/// their outbox event are atomic (spec: commit protocol).
+/// For mutations that must be atomic with their audit row (every API
+/// mutation), use [`append_in_tx`] on the mutation's transaction instead.
 pub async fn append(pool: &PgPool, entry: NewAuditEntry) -> Result<AuditRecord> {
     let mut tx = pool
         .begin()
         .await
         .map_err(|e| map_sqlx_error("failed to begin audit transaction", e))?;
 
+    let record = append_in_tx(&mut tx, entry).await?;
+
+    tx.commit()
+        .await
+        .map_err(|e| map_sqlx_error("failed to commit audit entry", e))?;
+
+    Ok(record)
+}
+
+/// Appends an entry to the audit chain on the caller's transaction.
+///
+/// The entry becomes durable if and only if the caller's transaction
+/// commits, which is exactly the atomicity the commit protocol requires
+/// (state change + audit row + outbox event, all or nothing).
+///
+/// Takes the audit-chain advisory lock (`pg_advisory_xact_lock`), which is
+/// held until the caller's transaction ends — so keep transactions that
+/// audit short, and take this lock last (it is a serialization point).
+pub async fn append_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entry: NewAuditEntry,
+) -> Result<AuditRecord> {
     // Serialize appends: the chain requires a total order over hashes.
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(AUDIT_CHAIN_LOCK_KEY)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|e| map_sqlx_error("failed to acquire audit chain lock", e))?;
 
     let prev_hash: Option<String> =
         sqlx::query_scalar("SELECT hash FROM audit_log ORDER BY seq DESC LIMIT 1")
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await
             .map_err(|e| map_sqlx_error("failed to read audit chain head", e))?;
 
@@ -205,13 +227,9 @@ pub async fn append(pool: &PgPool, entry: NewAuditEntry) -> Result<AuditRecord> 
     .bind(&entry.details)
     .bind(&prev_hash)
     .bind(&hash)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await
     .map_err(|e| map_sqlx_error("failed to append audit entry", e))?;
-
-    tx.commit()
-        .await
-        .map_err(|e| map_sqlx_error("failed to commit audit entry", e))?;
 
     Ok(record)
 }

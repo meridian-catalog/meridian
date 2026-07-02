@@ -1,6 +1,6 @@
 [package]
 name = "meridian-cli"
-description = "The meridian binary: serves the catalog and (soon) admin commands"
+description = "The meridian binary: serves the catalog and admin commands"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,6 +16,8 @@ clap = { workspace = true }
 meridian-common = { workspace = true }
 meridian-server = { workspace = true }
 meridian-store = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
