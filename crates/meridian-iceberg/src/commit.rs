@@ -189,6 +189,18 @@ pub enum CommitBackendError {
         /// Operator-facing description.
         message: String,
     },
+
+    /// The backend failed at the point of no return (the transaction commit
+    /// itself errored, e.g. a connection drop mid-`COMMIT`), so whether the
+    /// commit applied cannot be determined from this attempt (failure F3 in
+    /// the design doc). Maps to `5xx CommitStateUnknownException` at the API
+    /// boundary; a client retry with the same idempotency key resolves the
+    /// ambiguity (replay if it applied, fresh attempt if it did not).
+    #[error("commit state unknown: {message}")]
+    StateUnknown {
+        /// Operator-facing description.
+        message: String,
+    },
 }
 
 /// The pointer store the commit protocol runs against.

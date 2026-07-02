@@ -21,6 +21,7 @@ rust-version = "1.88"
 meridian-common = { path = "crates/meridian-common" }
 meridian-store = { path = "crates/meridian-store" }
 meridian-iceberg = { path = "crates/meridian-iceberg" }
+meridian-storage = { path = "crates/meridian-storage" }
 meridian-server = { path = "crates/meridian-server" }
 
 # Async runtime

@@ -1490,15 +1490,19 @@ dependencies = [
  "http",
  "http-body-util",
  "meridian-common",
+ "meridian-iceberg",
+ "meridian-storage",
  "meridian-store",
  "serde",
  "serde_json",
  "sqlx",
+ "tempfile",
  "tokio",
  "tower",
  "tower-http",
  "tracing",
  "ulid",
+ "uuid",
 ]
 
 [[package]]
@@ -1526,6 +1530,8 @@ dependencies = [
  "chrono",
  "hex",
  "meridian-common",
+ "meridian-iceberg",
+ "proptest",
  "serde",
  "serde_json",
  "sha2 0.10.9",

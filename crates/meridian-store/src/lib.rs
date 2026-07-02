@@ -6,9 +6,11 @@
 //! database; compile-time checking may be revisited once the schema settles.
 
 pub mod audit;
+pub mod commit;
 pub mod namespace;
 pub mod outbox;
 pub mod pool;
+pub mod table;
 pub mod tenancy;
 pub mod warehouse;
 

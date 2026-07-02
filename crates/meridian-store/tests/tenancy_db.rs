@@ -356,13 +356,16 @@ async fn namespace_delete_requires_empty() {
         .await
         .expect("get child")
         .expect("child exists");
+    let table_id = Ulid::new().to_string();
     sqlx::query(
-        "INSERT INTO tables (id, workspace_id, namespace_id, name) VALUES ($1, $2, $3, $4)",
+        "INSERT INTO tables (id, workspace_id, namespace_id, name, table_uuid)
+         VALUES ($1, $2, $3, $4, $5)",
     )
-    .bind(Ulid::new().to_string())
+    .bind(&table_id)
     .bind(ws.to_string())
     .bind(&child.id)
     .bind("t")
+    .bind(format!("uuid-{table_id}"))
     .execute(&pool)
     .await
     .expect("insert table row");
