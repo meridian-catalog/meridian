@@ -1,0 +1,16 @@
+[project]
+name = "meridian-e2e"
+version = "0.1.0"
+description = "End-to-end conformance suite: real engines against a running Meridian server"
+requires-python = ">=3.12"
+dependencies = [
+    "pyiceberg[pyarrow,s3fs]>=0.9",
+    "duckdb>=1.2",
+    "pytest>=8",
+    "requests>=2.32",
+    "boto3>=1.34",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
