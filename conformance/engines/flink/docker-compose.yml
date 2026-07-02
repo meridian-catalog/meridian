@@ -1,0 +1,38 @@
+# Flink 1.20 session cluster for the Meridian smoke test.
+#
+# network_mode: host is deliberate. Meridian vends the warehouse's
+# s3.endpoint (http://localhost:9000) in LoadTableResult.config, and the
+# Iceberg Java REST client merges that vended config OVER catalog-level
+# client properties — so a client-side s3.endpoint override does not stick.
+# With host networking, localhost:9000 inside the container reaches MinIO
+# (Docker Desktop publishes the meridian-minio port into the VM), so the
+# vended endpoint works as-is. The catalog URI is not vended, so it can
+# point at host.docker.internal:8181 where Meridian runs on the host.
+# Splitting internal vs. external endpoint vending is a known M2 item.
+services:
+  jobmanager:
+    image: flink:1.20-scala_2.12-java17
+    container_name: meridian-flink-jobmanager
+    network_mode: host
+    command: jobmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: localhost
+        rest.bind-address: 0.0.0.0
+    volumes:
+      - ./jars:/opt/flink/lib/iceberg:ro
+      - ./sql:/opt/sql:ro
+
+  taskmanager:
+    image: flink:1.20-scala_2.12-java17
+    container_name: meridian-flink-taskmanager
+    network_mode: host
+    command: taskmanager
+    depends_on:
+      - jobmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: localhost
+        taskmanager.numberOfTaskSlots: 4
+    volumes:
+      - ./jars:/opt/flink/lib/iceberg:ro
