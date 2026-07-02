@@ -1,0 +1,113 @@
+name: Release
+
+# Builds release binaries for Linux x86_64 and aarch64 on native runners
+# (no cross-compilation), generates SHA256SUMS, and publishes a GitHub
+# release with the artifacts attached.
+#
+# TODO(release-signing): artifact signing is NOT implemented yet. Once
+# signing keys / OIDC identity are set up, add cosign signatures and
+# SLSA provenance attestations for the tarballs and checksums here.
+# Until then, releases ship with checksums only — do not claim signed
+# releases anywhere in the docs.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked -p meridian-cli --target ${{ matrix.target }}
+
+      - name: Package tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          target="${{ matrix.target }}"
+          staging="meridian-${version}-${target}"
+          mkdir "${staging}"
+          cp "target/${target}/release/meridian" "${staging}/"
+          cp LICENSE README.md "${staging}/"
+          # Note: binaries link the build runner's glibc (Ubuntu 24.04,
+          # glibc 2.39) and will not run on older distros. Revisit with
+          # musl or zigbuild targets if that floor proves too high.
+          tar -czf "${staging}.tar.gz" "${staging}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball-${{ matrix.target }}
+          path: meridian-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tarball-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -l
+          sha256sum meridian-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create release and upload artifacts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          # Idempotent on re-run: create the release if the tag has none
+          # yet, otherwise just (re)upload the assets.
+          if ! gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release create "${tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --verify-tag \
+              --title "${tag}" \
+              --generate-notes
+          fi
+          gh release upload "${tag}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber \
+            dist/meridian-*.tar.gz dist/SHA256SUMS
