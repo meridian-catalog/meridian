@@ -23,6 +23,12 @@
 //!   [`VendingError::UnsupportedCloud`] with a clear message and exist so
 //!   the dispatch surface (and its error text) is settled.
 //!
+//! The sibling delegation mechanism, **remote signing**, lives in
+//! [`signing`] (ADR 005): instead of handing out scoped credentials, the
+//! server signs client-built S3 requests with warehouse credentials after
+//! [`signing::authorize_sign_request`] proves the request stays inside the
+//! table prefix.
+//!
 //! The vend itself is pure credential mechanics; audit logging is the
 //! caller's job (the server writes the audit row and outbox event in one
 //! transaction — the audit row is the product).
@@ -34,6 +40,7 @@ use chrono::{DateTime, Utc};
 
 mod config;
 mod policy;
+pub mod signing;
 mod static_vendor;
 mod sts;
 mod unsupported;

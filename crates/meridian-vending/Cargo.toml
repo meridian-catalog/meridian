@@ -1,6 +1,6 @@
 [package]
 name = "meridian-vending"
-description = "Meridian credential vending: scoped, short-lived storage credentials per table"
+description = "Meridian storage access delegation: per-table credential vending and remote request signing"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,7 +11,11 @@ rust-version.workspace = true
 aws-config = { workspace = true }
 aws-credential-types = { workspace = true }
 aws-sdk-sts = { workspace = true }
+aws-sigv4 = { workspace = true }
+aws-smithy-runtime-api = { workspace = true }
 chrono = { workspace = true }
+http = { workspace = true }
+percent-encoding = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
