@@ -24,6 +24,7 @@ use ulid::Ulid;
 mod auth;
 pub mod error;
 pub mod events;
+pub mod maintenance;
 pub mod planning;
 pub mod routes;
 
@@ -215,6 +216,49 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v2/audit/verify",
             get(routes::audit::verify_audit_chain),
         )
+        // Autonomous maintenance (Pillar C): policies CRUD, per-table health,
+        // the job queue, the savings ledger, and fleet health. Authorization
+        // per the routes::maintenance module docs (MANAGE_NAMESPACE for
+        // mutations, READ / management for reads).
+        .route(
+            "/api/v2/maintenance/policies",
+            get(routes::maintenance::list_policies)
+                .post(routes::maintenance::create_policy)
+                .put(routes::maintenance::update_policy)
+                .delete(routes::maintenance::delete_policy),
+        )
+        .route(
+            "/api/v2/maintenance/jobs",
+            get(routes::maintenance::list_jobs).post(routes::maintenance::trigger_job),
+        )
+        .route(
+            "/api/v2/maintenance/jobs/{id}",
+            get(routes::maintenance::get_job),
+        )
+        .route(
+            "/api/v2/maintenance/jobs/{id}/cancel",
+            post(routes::maintenance::cancel_job),
+        )
+        .route(
+            "/api/v2/maintenance/savings",
+            get(routes::maintenance::list_savings),
+        )
+        .route(
+            "/api/v2/maintenance/savings/rollup",
+            get(routes::maintenance::savings_rollup),
+        )
+        .route(
+            "/api/v2/warehouses/{name}/health-summary",
+            get(routes::maintenance::warehouse_health_summary),
+        )
+        .route(
+            "/api/v2/warehouses/{warehouse}/namespaces/{namespace}/tables/{table}/health",
+            get(routes::maintenance::get_table_health),
+        )
+        .route(
+            "/api/v2/warehouses/{warehouse}/namespaces/{namespace}/tables/{table}/health/history",
+            get(routes::maintenance::get_table_health_history),
+        )
         .route("/api/v2/events", get(routes::events::list_events))
         .route(
             "/api/v2/events/consumers",
@@ -354,6 +398,26 @@ pub async fn serve(config: AppConfig, pool: PgPool) -> Result<()> {
     // enforces the manifest byte-cache budget. Idempotent; safe to abort.
     let plan_sweeper = tokio::spawn(planning::run_sweeper(pool.clone(), config.planning.clone()));
 
+    // Autonomous table maintenance (Pillar C): the job worker drains the
+    // maintenance queue (running compaction/expiry as normal audited
+    // commits), and the reconciler enqueues policy-violating tables. Both are
+    // crash-safe by construction (the queue and jobs are durable), so
+    // aborting them at shutdown is fine — an in-flight job re-queues.
+    let maintenance_tasks = if config.maintenance.enabled {
+        let worker = tokio::spawn(maintenance::run_worker(
+            pool.clone(),
+            config.maintenance.clone(),
+        ));
+        let reconciler = tokio::spawn(maintenance::run_reconciler(
+            pool.clone(),
+            config.maintenance.clone(),
+        ));
+        Some((worker, reconciler))
+    } else {
+        tracing::info!("autonomous maintenance disabled by configuration");
+        None
+    };
+
     let state = AppState {
         pool,
         config: Arc::new(config),
@@ -370,6 +434,10 @@ pub async fn serve(config: AppConfig, pool: PgPool) -> Result<()> {
     relay.abort();
     dispatcher.abort();
     plan_sweeper.abort();
+    if let Some((worker, reconciler)) = maintenance_tasks {
+        worker.abort();
+        reconciler.abort();
+    }
     served?;
 
     tracing::info!("meridian server shut down cleanly");

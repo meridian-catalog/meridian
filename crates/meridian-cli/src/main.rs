@@ -99,6 +99,10 @@ enum Command {
     #[command(subcommand)]
     Events(EventsCommand),
 
+    /// Inspect table health and drive autonomous maintenance (Pillar C).
+    #[command(subcommand)]
+    Maintenance(MaintenanceCommand),
+
     /// Diff a catalog-as-code bundle against a running server (read-only).
     ///
     /// Prints a create/update/noop/would-delete report. Deletes are never
@@ -159,6 +163,112 @@ enum EventsCommand {
         /// Poll interval in seconds while waiting for new events.
         #[arg(long, default_value_t = 2, value_name = "SECONDS")]
         interval: u64,
+
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+}
+
+/// Common `--warehouse NS.TABLE` addressing shared by table-scoped
+/// maintenance subcommands.
+#[derive(Debug, clap::Args)]
+struct TableTarget {
+    /// The table as namespace.table (dot-separated namespace).
+    #[arg(value_name = "NAMESPACE.TABLE")]
+    table: String,
+
+    /// Warehouse the table belongs to.
+    #[arg(long)]
+    warehouse: String,
+
+    /// Base URL of the Meridian server.
+    #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+    server: String,
+
+    /// Bearer token (required when the server runs auth.mode = "oidc").
+    #[arg(long, value_name = "TOKEN")]
+    token: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum MaintenanceCommand {
+    /// Show a table's health score, metrics, and top recommendations.
+    Health {
+        #[command(flatten)]
+        target: TableTarget,
+    },
+
+    /// Trigger a compaction job on a table (queued for the worker).
+    Compact {
+        #[command(flatten)]
+        target: TableTarget,
+
+        /// Plan only: run the executor's dry-run, staging nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Trigger a snapshot-expiry job on a table (metadata-only).
+    Expire {
+        #[command(flatten)]
+        target: TableTarget,
+    },
+
+    /// List maintenance jobs.
+    Jobs {
+        /// Filter by state (queued, running, succeeded, failed, cancelled).
+        #[arg(long)]
+        state: Option<String>,
+
+        /// Maximum number of jobs to show.
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// Cancel a queued or running job by id.
+    Cancel {
+        /// The job id.
+        #[arg(value_name = "JOB_ID")]
+        id: String,
+
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// List maintenance policies.
+    Policies {
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// The monthly savings roll-up ("Meridian saved X bytes / Y files").
+    Savings {
+        /// Number of months to roll up.
+        #[arg(long, default_value_t = 12)]
+        months: i64,
 
         /// Base URL of the Meridian server.
         #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
@@ -388,6 +498,7 @@ fn main() -> ExitCode {
         Command::Role(command) => run_async(run_role(command)),
         Command::Grant(command) => run_async(run_grant(command)),
         Command::Events(command) => run_async(run_events(command)),
+        Command::Maintenance(command) => run_async(run_maintenance(command)),
         Command::Plan {
             file,
             server,
@@ -908,6 +1019,246 @@ async fn run_events(command: EventsCommand) -> Result<(), CliError> {
             }
         }
     }
+}
+
+/// Splits a `namespace.table` argument into `(levels, table_name)`.
+fn split_table_arg(raw: &str) -> Result<(Vec<String>, String), CliError> {
+    let mut levels = parse_namespace_arg(raw)?;
+    if levels.len() < 2 {
+        return Err(CliError(format!(
+            "invalid table {raw:?}: expected namespace.table (dot-separated)"
+        )));
+    }
+    let name = levels.pop().unwrap_or_default();
+    Ok((levels, name))
+}
+
+/// `meridian maintenance ...` — health, triggers, jobs, policies, savings.
+async fn run_maintenance(command: MaintenanceCommand) -> Result<(), CliError> {
+    match command {
+        MaintenanceCommand::Health { target } => maintenance_health(target).await,
+        MaintenanceCommand::Compact { target, dry_run } => {
+            maintenance_trigger(target, "compaction", dry_run).await
+        }
+        MaintenanceCommand::Expire { target } => {
+            maintenance_trigger(target, "expire_snapshots", false).await
+        }
+        MaintenanceCommand::Jobs {
+            state,
+            limit,
+            server,
+            token,
+        } => maintenance_jobs(&server, token.as_deref(), state.as_deref(), limit).await,
+        MaintenanceCommand::Cancel { id, server, token } => {
+            let body = client::maintenance_cancel(&server, token.as_deref(), &id).await?;
+            let state = body.get("state").and_then(Value::as_str).unwrap_or("?");
+            println!("job {id} is now {state}");
+            Ok(())
+        }
+        MaintenanceCommand::Policies { server, token } => {
+            maintenance_policies(&server, token.as_deref()).await
+        }
+        MaintenanceCommand::Savings {
+            months,
+            server,
+            token,
+        } => maintenance_savings(&server, token.as_deref(), months).await,
+    }
+}
+
+/// `meridian maintenance health` — the score, metric table, and recommendations.
+async fn maintenance_health(target: TableTarget) -> Result<(), CliError> {
+    let (levels, name) = split_table_arg(&target.table)?;
+    let body = client::maintenance_health(
+        &target.server,
+        target.token.as_deref(),
+        &target.warehouse,
+        &levels,
+        &name,
+    )
+    .await?;
+    let score = body.get("score").and_then(Value::as_i64).unwrap_or(-1);
+    let metrics = body.get("metrics").cloned().unwrap_or(Value::Null);
+    let num = |key: &str| {
+        metrics
+            .get(key)
+            .map_or_else(|| "-".to_owned(), render_scalar)
+    };
+    let rows = vec![
+        vec!["score".to_owned(), format!("{score} / 100")],
+        vec!["data_files".to_owned(), num("data_file_count")],
+        vec!["total_bytes".to_owned(), num("total_bytes")],
+        vec!["small_file_ratio".to_owned(), num("small_file_ratio")],
+        vec!["avg_file_bytes".to_owned(), num("avg_file_bytes")],
+        vec!["snapshot_count".to_owned(), num("snapshot_count")],
+        vec!["delete_debt_ratio".to_owned(), num("delete_debt_ratio")],
+        vec!["manifest_count".to_owned(), num("manifest_count")],
+    ];
+    print!("{}", client::render_table(&["METRIC", "VALUE"], &rows));
+    let recs = body
+        .get("recommendations")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if recs.is_empty() {
+        println!("\nno recommendations — table is healthy");
+    } else {
+        println!("\nrecommendations:");
+        for rec in recs {
+            let action = rec.get("action").and_then(Value::as_str).unwrap_or("?");
+            let reason = rec.get("reason").and_then(Value::as_str).unwrap_or("");
+            println!("  - {action}: {reason}");
+        }
+    }
+    Ok(())
+}
+
+/// `meridian maintenance compact|expire` — enqueue a job on a table.
+async fn maintenance_trigger(
+    target: TableTarget,
+    job_type: &str,
+    dry_run: bool,
+) -> Result<(), CliError> {
+    let (levels, name) = split_table_arg(&target.table)?;
+    let body = client::maintenance_trigger(
+        &target.server,
+        target.token.as_deref(),
+        &target.warehouse,
+        &levels,
+        &name,
+        job_type,
+        dry_run,
+    )
+    .await?;
+    let id = body.get("id").and_then(Value::as_str).unwrap_or("?");
+    let state = body.get("state").and_then(Value::as_str).unwrap_or("?");
+    println!("enqueued {job_type} job {id} ({state})");
+    Ok(())
+}
+
+/// `meridian maintenance jobs` — the job queue as a table.
+async fn maintenance_jobs(
+    server: &str,
+    token: Option<&str>,
+    state: Option<&str>,
+    limit: i64,
+) -> Result<(), CliError> {
+    let body = client::maintenance_jobs(server, token, state, limit).await?;
+    let jobs = body
+        .get("jobs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CliError("malformed response: missing jobs".to_owned()))?;
+    let rows: Vec<Vec<String>> = jobs
+        .iter()
+        .map(|j| {
+            vec![
+                j.get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_owned(),
+                j.get("job_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_owned(),
+                j.get("state")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_owned(),
+                j.get("attempts")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0)
+                    .to_string(),
+                j.get("created_by")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_owned(),
+            ]
+        })
+        .collect();
+    print!(
+        "{}",
+        client::render_table(&["ID", "TYPE", "STATE", "ATTEMPTS", "BY"], &rows)
+    );
+    Ok(())
+}
+
+/// `meridian maintenance policies` — the policy list as a table.
+async fn maintenance_policies(server: &str, token: Option<&str>) -> Result<(), CliError> {
+    let body = client::maintenance_policies(server, token).await?;
+    let policies = body
+        .get("policies")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CliError("malformed response: missing policies".to_owned()))?;
+    let rows: Vec<Vec<String>> = policies
+        .iter()
+        .map(|p| {
+            vec![
+                p.get("scope_label")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_owned(),
+                p.get("target_file_size_bytes")
+                    .map_or_else(|| "-".to_owned(), render_scalar),
+                p.get("snapshot_retention_count")
+                    .map_or_else(|| "-".to_owned(), render_scalar),
+                p.get("enabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    .to_string(),
+            ]
+        })
+        .collect();
+    print!(
+        "{}",
+        client::render_table(
+            &["SCOPE", "TARGET_BYTES", "KEEP_SNAPSHOTS", "ENABLED"],
+            &rows
+        )
+    );
+    Ok(())
+}
+
+/// `meridian maintenance savings` — the monthly roll-up as a table.
+async fn maintenance_savings(
+    server: &str,
+    token: Option<&str>,
+    months: i64,
+) -> Result<(), CliError> {
+    let body = client::maintenance_savings_rollup(server, token, months).await?;
+    let rollup = body
+        .get("rollup")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CliError("malformed response: missing rollup".to_owned()))?;
+    if rollup.is_empty() {
+        println!("no savings recorded yet");
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = rollup
+        .iter()
+        .map(|r| {
+            vec![
+                r.get("period")
+                    .map_or_else(|| "?".to_owned(), render_scalar),
+                r.get("job_count")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0)
+                    .to_string(),
+                r.get("bytes_saved")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0)
+                    .to_string(),
+                r.get("files_removed")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0)
+                    .to_string(),
+            ]
+        })
+        .collect();
+    print!(
+        "{}",
+        client::render_table(&["PERIOD", "JOBS", "BYTES_SAVED", "FILES_REMOVED"], &rows)
+    );
+    Ok(())
 }
 
 fn run_serve(all_in_one: bool, config_path: Option<&std::path::Path>) -> Result<(), MeridianError> {

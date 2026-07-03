@@ -12,6 +12,7 @@ pub mod events;
 pub mod grants;
 pub mod health;
 pub mod iceberg;
+pub mod maintenance;
 pub mod namespaces;
 pub mod planning;
 pub mod principals;

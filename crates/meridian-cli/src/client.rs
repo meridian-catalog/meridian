@@ -353,6 +353,106 @@ pub(crate) async fn grant_remove(
     Ok(())
 }
 
+// ---- maintenance (Pillar C) ------------------------------------------------
+
+/// `GET /api/v2/warehouses/{w}/namespaces/{ns}/tables/{t}/health`.
+pub(crate) async fn maintenance_health(
+    server: &str,
+    token: Option<&str>,
+    warehouse: &str,
+    namespace: &[String],
+    table: &str,
+) -> Result<Value, CliError> {
+    let ns = encode_namespace(namespace);
+    let request = http_client()?.get(format!(
+        "{}/api/v2/warehouses/{warehouse}/namespaces/{ns}/tables/{table}/health",
+        base(server)
+    ));
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
+/// `POST /api/v2/maintenance/jobs` — enqueue a compaction/expiry job.
+pub(crate) async fn maintenance_trigger(
+    server: &str,
+    token: Option<&str>,
+    warehouse: &str,
+    namespace: &[String],
+    table: &str,
+    job_type: &str,
+    dry_run: bool,
+) -> Result<Value, CliError> {
+    let request = http_client()?
+        .post(format!("{}/api/v2/maintenance/jobs", base(server)))
+        .json(&json!({
+            "warehouse": warehouse,
+            "namespace": namespace.join("."),
+            "table": table,
+            "job_type": job_type,
+            "dry_run": dry_run,
+        }));
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
+/// `GET /api/v2/maintenance/jobs`.
+pub(crate) async fn maintenance_jobs(
+    server: &str,
+    token: Option<&str>,
+    state: Option<&str>,
+    limit: i64,
+) -> Result<Value, CliError> {
+    let mut query: Vec<(&str, String)> = vec![("limit", limit.to_string())];
+    if let Some(state) = state {
+        query.push(("state", state.to_owned()));
+    }
+    let request = http_client()?
+        .get(format!("{}/api/v2/maintenance/jobs", base(server)))
+        .query(&query);
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
+/// `POST /api/v2/maintenance/jobs/{id}/cancel`.
+pub(crate) async fn maintenance_cancel(
+    server: &str,
+    token: Option<&str>,
+    id: &str,
+) -> Result<Value, CliError> {
+    let request = http_client()?.post(format!(
+        "{}/api/v2/maintenance/jobs/{id}/cancel",
+        base(server)
+    ));
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
+/// `GET /api/v2/maintenance/policies`.
+pub(crate) async fn maintenance_policies(
+    server: &str,
+    token: Option<&str>,
+) -> Result<Value, CliError> {
+    let request = http_client()?.get(format!("{}/api/v2/maintenance/policies", base(server)));
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
+/// `GET /api/v2/maintenance/savings/rollup`.
+pub(crate) async fn maintenance_savings_rollup(
+    server: &str,
+    token: Option<&str>,
+    months: i64,
+) -> Result<Value, CliError> {
+    let request = http_client()?
+        .get(format!(
+            "{}/api/v2/maintenance/savings/rollup",
+            base(server)
+        ))
+        .query(&[("months", months.to_string())]);
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
 /// Renders rows as a plain aligned text table.
 #[must_use]
 pub(crate) fn render_table(headers: &[&str], rows: &[Vec<String>]) -> String {

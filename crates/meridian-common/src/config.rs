@@ -39,6 +39,85 @@ pub struct AppConfig {
     pub events: EventsConfig,
     /// Server-side scan planning settings.
     pub planning: PlanningConfig,
+    /// Autonomous table-maintenance settings (Pillar C worker).
+    pub maintenance: MaintenanceConfig,
+}
+
+/// Autonomous table-maintenance settings (`[maintenance]`): the background
+/// worker that runs the built-in executors and the desired-state
+/// reconciliation loop (spec Pillar C). Both run inside `meridian serve`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MaintenanceConfig {
+    /// Master switch. When `false` neither the job worker nor the
+    /// reconciliation loop is spawned: maintenance jobs stay `queued` and no
+    /// policy-driven jobs are enqueued. The API and CLI still work (manual
+    /// triggers enqueue; they are just not drained).
+    pub enabled: bool,
+    /// Job-worker poll interval in milliseconds once the queue is drained.
+    /// The worker claims one job per iteration (`FOR UPDATE SKIP LOCKED`) and
+    /// keeps going while jobs are available, sleeping only when the queue is
+    /// empty.
+    pub worker_poll_ms: u64,
+    /// Attempts a single maintenance job gets before it is marked `failed`.
+    /// A commit-conflict re-plan (yield to a writer) does not consume an
+    /// attempt on its own; this bounds genuine execution failures.
+    pub max_job_attempts: i32,
+    /// How many times one job execution re-plans and retries after losing the
+    /// optimistic-commit race to a concurrent writer commit (spec C-F4:
+    /// maintenance commits always yield to writer commits). Exhausting this
+    /// re-queues the job (it is not a failure — the table is simply busy).
+    pub commit_retry_limit: u32,
+    /// Whether the desired-state reconciliation loop runs (spec C-F3). When
+    /// `false` the worker only drains explicitly-enqueued jobs; no jobs are
+    /// created from policy target violations.
+    pub reconcile_enabled: bool,
+    /// Reconciliation-loop interval in seconds: how often enabled policies are
+    /// evaluated against table health to enqueue violating tables.
+    pub reconcile_interval_secs: u64,
+    /// Per-table debounce in seconds: the reconciliation loop will not enqueue
+    /// a second job for a table until this long after the previous enqueue,
+    /// so one unhealthy table cannot flood the queue (spec C-F3 debounce).
+    pub reconcile_debounce_secs: u64,
+    /// Commit-storm coalescing window in seconds (spec C-F3 streaming-aware
+    /// mode): a table whose newest snapshot advanced within this many seconds
+    /// of the reconciliation pass is treated as actively committing and is
+    /// skipped — compacting it would only lose the commit race to the writer.
+    pub reconcile_commit_quiet_secs: i64,
+    /// Small-file ratio at or above which the reconciliation loop enqueues a
+    /// compaction (in `[0,1]`). The health model's small-file signal.
+    pub reconcile_small_file_ratio: f64,
+    /// Snapshot count above which the reconciliation loop enqueues a snapshot
+    /// expiry, when the effective policy's retention is exceeded.
+    pub reconcile_snapshot_slack: i32,
+    /// Extra retained snapshots kept beyond the policy's `retention_count`
+    /// even when age would allow expiry — a fixed safety window so expiry
+    /// never trims a table down to exactly the current snapshot (spec C-F2
+    /// "safety window"). Expiry keeps `max(retention_count, this)` snapshots.
+    pub expiry_min_snapshots_kept: i32,
+    /// Whether the worker may run snapshot-expiry jobs. Expiry is
+    /// metadata-only (drops old snapshots via `remove-snapshots`), but it is
+    /// destructive of history, so it has its own switch, default on.
+    pub expiry_enabled: bool,
+}
+
+impl Default for MaintenanceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            worker_poll_ms: 2_000,
+            max_job_attempts: 3,
+            commit_retry_limit: 5,
+            reconcile_enabled: true,
+            reconcile_interval_secs: 300,
+            reconcile_debounce_secs: 3_600,
+            reconcile_commit_quiet_secs: 120,
+            reconcile_small_file_ratio: 0.30,
+            reconcile_snapshot_slack: 0,
+            expiry_min_snapshots_kept: 1,
+            expiry_enabled: true,
+        }
+    }
 }
 
 /// Server-side scan-planning settings (`[planning]`): the IRC

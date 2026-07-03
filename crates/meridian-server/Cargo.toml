@@ -16,6 +16,7 @@ sha2 = { workspace = true }
 http = { workspace = true }
 jsonwebtoken = { workspace = true }
 meridian-common = { workspace = true }
+meridian-executor = { workspace = true }
 meridian-iceberg = { workspace = true }
 meridian-storage = { workspace = true }
 meridian-store = { workspace = true }
@@ -37,6 +38,14 @@ uuid = { workspace = true, features = ["v4"] }
 http-body-util = { workspace = true }
 meridian-bench = { path = "../../testing/bench" }
 tempfile = "3.20"
+bytes = "1.10"
+# The maintenance-worker end-to-end test builds a real small-files Iceberg
+# table (real Parquet data files + real manifest Avro) on fs storage, runs the
+# worker against it, and reads the compacted output back — the same read/write
+# path production uses. Matches the executor crate's fixture toolchain.
+arrow-array = { version = "59", default-features = false }
+arrow-schema = { version = "59", default-features = false }
+parquet = { version = "59", default-features = false, features = ["arrow", "zstd"] }
 
 [lints]
 workspace = true
