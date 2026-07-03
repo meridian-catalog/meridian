@@ -355,6 +355,12 @@ pub struct MetadataBuilder {
     /// Whether the UUID is fixed (true for existing tables and after an
     /// `assign-uuid` update).
     uuid_assigned: bool,
+    /// Whether the pre-seeded unpartitioned spec 0 of a brand-new table is
+    /// still a placeholder. The first `add-spec` on a new table replaces it
+    /// and takes id 0 itself, matching the reference implementation (a
+    /// table created with a partition spec carries exactly one spec,
+    /// numbered 0). Always false for builders on existing tables.
+    replaceable_default_spec: bool,
 }
 
 impl TableMetadata {
@@ -367,6 +373,7 @@ impl TableMetadata {
             last_added_spec_id: None,
             last_added_order_id: None,
             uuid_assigned: true,
+            replaceable_default_spec: false,
         }
     }
 }
@@ -375,8 +382,10 @@ impl MetadataBuilder {
     /// Starts a builder for a brand-new table.
     ///
     /// The table gets a fresh UUID (replaceable by one `assign-uuid`
-    /// update), the unpartitioned spec 0, and the unsorted order 0. At least
-    /// one `add-schema` and a `set-current-schema` must be applied before
+    /// update), the unpartitioned spec 0 (a placeholder — the first
+    /// `add-spec` replaces it and becomes spec 0 itself, as in the
+    /// reference implementation), and the unsorted order 0. At least one
+    /// `add-schema` and a `set-current-schema` must be applied before
     /// [`MetadataBuilder::build`] succeeds.
     pub fn new_table(
         format_version: u8,
@@ -422,6 +431,7 @@ impl MetadataBuilder {
             last_added_spec_id: None,
             last_added_order_id: None,
             uuid_assigned: false,
+            replaceable_default_spec: true,
         })
     }
 
@@ -805,6 +815,14 @@ impl MetadataBuilder {
     }
 
     fn add_spec(&mut self, mut spec: PartitionSpec) -> Result<(), MetadataBuildError> {
+        // On a brand-new table the pre-seeded unpartitioned spec 0 is a
+        // placeholder: the first added spec replaces it and takes id 0, so
+        // a table created with a partition spec carries exactly one spec,
+        // numbered 0, like the reference implementation. (An added spec
+        // that is itself unpartitioned instead matches the placeholder
+        // structurally below and reuses id 0 directly.) Cleared on the
+        // first add-spec either way; later add-specs append as usual.
+        let replace_placeholder = std::mem::take(&mut self.replaceable_default_spec);
         let schema_field_ids = self.current_schema_field_ids()?;
         let mut names = BTreeSet::new();
         for field in &spec.fields {
@@ -870,13 +888,19 @@ impl MetadataBuilder {
             }
         }
 
-        let new_spec_id = self
-            .metadata
-            .partition_specs
-            .iter()
-            .filter_map(|s| s.spec_id)
-            .max()
-            .map_or(0, |max| max + 1);
+        let new_spec_id = if replace_placeholder {
+            // The flag guarantees the placeholder is the only spec: nothing
+            // else has been added, and the default spec cannot be removed.
+            self.metadata.partition_specs.clear();
+            0
+        } else {
+            self.metadata
+                .partition_specs
+                .iter()
+                .filter_map(|s| s.spec_id)
+                .max()
+                .map_or(0, |max| max + 1)
+        };
         spec.spec_id = Some(new_spec_id);
         self.metadata.last_partition_id = self
             .metadata

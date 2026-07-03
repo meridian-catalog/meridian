@@ -28,6 +28,14 @@
 //!   update list, at which point the first metadata file is written and the
 //!   row inserted atomically. Persisting a provisional staged file would
 //!   only manufacture a guaranteed orphan.
+//! - **Create-request field ids are provisional**: like the reference
+//!   implementation (`AssignFreshIds`), `createTable` reassigns schema
+//!   field ids server-side (1-based, nested types included) and remaps
+//!   `identifier-field-ids` and partition-spec/sort-order source ids —
+//!   Flink numbers provisional ids from 0, `PyIceberg` from 1. The
+//!   requested partition spec becomes the table's only spec, id 0. Commit
+//!   `add-schema` updates carry real ids and stay strictly validated. See
+//!   [`meridian_iceberg::spec::fresh`].
 //! - **`purgeRequested=true`** today: the pointer row is deleted and a
 //!   `table.purge_requested` outbox event is enqueued in the same
 //!   transaction, then the table's `metadata/` prefix is deleted
@@ -556,28 +564,38 @@ fn build_new_table_metadata(
         _ => default_table_location(storage_root, levels, &request.name, table_uuid),
     };
 
+    // Field ids in a create request are provisional (Flink numbers them
+    // from 0, pyiceberg from 1): assign fresh server-side ids and remap the
+    // requested partition-spec/sort-order source ids, as the reference
+    // implementation does (`TypeUtil.assignFreshIds`). Commit-path
+    // `add-schema` updates carry real ids and are validated strictly.
+    let fresh = meridian_iceberg::spec::assign_fresh_ids(
+        &request.schema,
+        request.partition_spec.as_ref(),
+        request.write_order.as_ref(),
+    )
+    .map_err(|e| map_build_error(&e))?;
+
     let mut builder =
         MetadataBuilder::new_table(format_version, location).map_err(|e| map_build_error(&e))?;
     let mut updates: Vec<TableUpdate> = vec![
         TableUpdate::AssignUuid { uuid: table_uuid },
         TableUpdate::AddSchema {
-            schema: request.schema.clone(),
+            schema: fresh.schema,
             last_column_id: None,
         },
         TableUpdate::SetCurrentSchema {
             schema_id: meridian_iceberg::spec::LAST_ADDED,
         },
     ];
-    if let Some(spec) = &request.partition_spec {
-        updates.push(TableUpdate::AddSpec { spec: spec.clone() });
+    if let Some(spec) = fresh.partition_spec {
+        updates.push(TableUpdate::AddSpec { spec });
         updates.push(TableUpdate::SetDefaultSpec {
             spec_id: meridian_iceberg::spec::LAST_ADDED,
         });
     }
-    if let Some(order) = &request.write_order {
-        updates.push(TableUpdate::AddSortOrder {
-            sort_order: order.clone(),
-        });
+    if let Some(sort_order) = fresh.sort_order {
+        updates.push(TableUpdate::AddSortOrder { sort_order });
         updates.push(TableUpdate::SetDefaultSortOrder {
             sort_order_id: meridian_iceberg::spec::LAST_ADDED,
         });

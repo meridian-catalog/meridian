@@ -3,15 +3,15 @@
 #   - MinIO bucket        flink-smoke
 #   - Meridian warehouse  flink_smoke
 #   - namespace           flink_ns
-#   - table               flink_ns.events  (dropped and re-created, so the
-#                         row counts in the smoke scripts are deterministic)
 #
-# The table is created via the REST API instead of Flink DDL because
-# Meridian currently rejects the create-table request Flink sends: the
-# Flink connector assigns provisional field ids starting at 0, and
-# Meridian validates ids as positive instead of reassigning fresh ones
-# ("Malformed request: invalid schema: field id 0 is not positive").
-# See README.md ("Known issues").
+# The flink_ns.events table is dropped (if present) so the smoke's
+# CREATE TABLE runs real Flink DDL and the row counts stay deterministic.
+# Historical note: this script used to pre-create the table via REST as a
+# workaround for a Meridian bug — create requests carrying Flink's 0-based
+# provisional field ids were rejected ("invalid schema: field id 0 is not
+# positive") instead of getting fresh server-assigned ids. Meridian now
+# treats create-request field ids as provisional and assigns fresh ones
+# (like the Java reference implementation), so Flink DDL works directly.
 set -eu
 
 MERIDIAN_URL="${MERIDIAN_URL:-http://localhost:8181}"
@@ -50,27 +50,12 @@ case "$code" in
   *) echo "namespace create failed: HTTP $code" >&2; exit 1 ;;
 esac
 
-# Reset the table so the smoke's expected row counts (3, then 53) hold.
-curl -s -o /dev/null -X DELETE \
-    "$MERIDIAN_URL/iceberg/v1/flink_smoke/namespaces/flink_ns/tables/events"
-code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
-    "$MERIDIAN_URL/iceberg/v1/flink_smoke/namespaces/flink_ns/tables" \
-    -H 'Content-Type: application/json' -d '{
-      "name": "events",
-      "schema": {
-        "type": "struct",
-        "schema-id": 0,
-        "fields": [
-          {"id": 1, "name": "id",    "required": false, "type": "long"},
-          {"id": 2, "name": "name",  "required": false, "type": "string"},
-          {"id": 3, "name": "value", "required": false, "type": "double"},
-          {"id": 4, "name": "ts",    "required": false, "type": "timestamp"}
-        ]
-      },
-      "stage-create": false,
-      "properties": {}
-    }')
+# Drop the table so the smoke's CREATE TABLE IF NOT EXISTS actually runs
+# Flink DDL and the expected row counts (3, then 53) hold on every run.
+code=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+    "$MERIDIAN_URL/iceberg/v1/flink_smoke/namespaces/flink_ns/tables/events")
 case "$code" in
-  2??) echo "table flink_ns.events created" ;;
-  *) echo "table create failed: HTTP $code" >&2; exit 1 ;;
+  2??) echo "table flink_ns.events dropped" ;;
+  404) echo "table flink_ns.events absent (ok)" ;;
+  *) echo "table drop failed: HTTP $code" >&2; exit 1 ;;
 esac

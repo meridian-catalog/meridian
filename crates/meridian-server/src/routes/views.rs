@@ -487,12 +487,19 @@ fn build_new_view_metadata(
     let mut view_version = request.view_version.clone();
     view_version.schema_id = LAST_ADDED;
 
+    // Field ids in a create request are provisional, exactly as on
+    // `createTable`: Spark's `CREATE VIEW` numbers the output schema from 0,
+    // pyiceberg from 1. Assign fresh server-side ids (view schemas have no
+    // partition spec or sort order to remap).
+    let fresh = meridian_iceberg::spec::assign_fresh_ids(&request.schema, None, None)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
     let mut builder =
         ViewMetadataBuilder::new_view(location).map_err(|e| map_view_build_error(&e))?;
     let mut updates: Vec<ViewUpdate> = vec![
         ViewUpdate::AssignUuid { uuid: view_uuid },
         ViewUpdate::AddSchema {
-            schema: request.schema.clone(),
+            schema: fresh.schema,
             last_column_id: None,
         },
         ViewUpdate::AddViewVersion { view_version },

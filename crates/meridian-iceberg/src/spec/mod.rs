@@ -22,6 +22,7 @@
 
 pub mod builder;
 pub mod encryption;
+pub mod fresh;
 pub mod partition;
 pub mod requirement;
 pub mod schema;
@@ -39,6 +40,7 @@ pub mod view_update;
 
 pub use builder::{MetadataBuildError, MetadataBuilder};
 pub use encryption::EncryptedKey;
+pub use fresh::{FreshCreate, assign_fresh_ids};
 pub use partition::{PartitionField, PartitionSpec};
 pub use requirement::{RequirementFailed, TableRequirement};
 pub use schema::Schema;

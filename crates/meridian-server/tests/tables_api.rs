@@ -435,6 +435,145 @@ async fn create_table_writes_metadata_and_rejects_conflicts() {
     assert_eq!(body["metadata"]["properties"]["owner"], "tests");
 }
 
+/// Create-request field ids are provisional: the exact request shape
+/// Flink's connector sends (0-based ids, previously rejected with
+/// `field id 0 is not positive`) must succeed, with fresh 1-based ids
+/// assigned server-side and spec/order sources remapped.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // one test walks the whole provisional-id surface
+async fn create_table_treats_request_field_ids_as_provisional() {
+    let Some(ctx) = test_ctx().await else { return };
+    make_namespace(&ctx, "db").await;
+
+    // The payload Flink 1.20 (iceberg-flink-runtime 1.11.0) sends for
+    // CREATE TABLE events (id BIGINT, name STRING, `value` DOUBLE,
+    // ts TIMESTAMP(6)) — provisional field ids start at 0.
+    let (status, body) = send(
+        &ctx.router,
+        "POST",
+        &format!("/v1/{}/namespaces/db/tables", ctx.warehouse),
+        None,
+        Some(json!({
+            "name": "events",
+            "schema": {
+                "type": "struct",
+                "schema-id": 0,
+                "fields": [
+                    { "id": 0, "name": "id",    "required": false, "type": "long" },
+                    { "id": 1, "name": "name",  "required": false, "type": "string" },
+                    { "id": 2, "name": "value", "required": false, "type": "double" },
+                    { "id": 3, "name": "ts",    "required": false, "type": "timestamp" },
+                ],
+            },
+            "stage-create": false,
+            "properties": {},
+        })),
+    )
+    .await;
+    assert_eq!(status.1, StatusCode::OK, "Flink-shaped create: {body}");
+    let fields = body["metadata"]["schemas"][0]["fields"]
+        .as_array()
+        .expect("schema fields");
+    let ids: Vec<i64> = fields.iter().map(|f| f["id"].as_i64().unwrap()).collect();
+    assert_eq!(ids, vec![1, 2, 3, 4], "fresh 1-based ids: {body}");
+    assert_eq!(body["metadata"]["last-column-id"], 4);
+
+    // A partitioned + sorted create with 0-based ids: sources are remapped
+    // and the requested spec becomes the table's only spec, numbered 0
+    // (reference behavior — no phantom empty spec).
+    let (status, body) = send(
+        &ctx.router,
+        "POST",
+        &format!("/v1/{}/namespaces/db/tables", ctx.warehouse),
+        None,
+        Some(json!({
+            "name": "events_by_day",
+            "schema": {
+                "type": "struct",
+                "fields": [
+                    { "id": 0, "name": "id", "required": true, "type": "long" },
+                    { "id": 1, "name": "ts", "required": true, "type": "timestamp" },
+                ],
+            },
+            "partition-spec": {
+                "spec-id": 0,
+                "fields": [
+                    { "source-id": 1, "field-id": 1000, "name": "ts_day", "transform": "day" },
+                ],
+            },
+            "write-order": {
+                "order-id": 1,
+                "fields": [
+                    { "transform": "identity", "source-id": 0,
+                      "direction": "asc", "null-order": "nulls-first" },
+                ],
+            },
+        })),
+    )
+    .await;
+    assert_eq!(status.1, StatusCode::OK, "partitioned create: {body}");
+    let specs = body["metadata"]["partition-specs"]
+        .as_array()
+        .expect("partition-specs");
+    assert_eq!(specs.len(), 1, "exactly one spec: {body}");
+    assert_eq!(specs[0]["spec-id"], 0);
+    assert_eq!(body["metadata"]["default-spec-id"], 0);
+    assert_eq!(
+        specs[0]["fields"][0]["source-id"], 2,
+        "ts is field 2 after fresh assignment: {body}"
+    );
+    assert_eq!(specs[0]["fields"][0]["field-id"], 1000);
+    let orders = body["metadata"]["sort-orders"].as_array().expect("orders");
+    let default_order = orders
+        .iter()
+        .find(|o| o["order-id"] == body["metadata"]["default-sort-order-id"])
+        .expect("default sort order");
+    assert_eq!(
+        default_order["fields"][0]["source-id"], 1,
+        "id is field 1 after fresh assignment: {body}"
+    );
+
+    // Genuinely broken requests still fail: a partition source no field
+    // carries.
+    let (status, body) = send(
+        &ctx.router,
+        "POST",
+        &format!("/v1/{}/namespaces/db/tables", ctx.warehouse),
+        None,
+        Some(json!({
+            "name": "broken",
+            "schema": { "type": "struct", "fields": [
+                { "id": 0, "name": "id", "required": true, "type": "long" },
+            ]},
+            "partition-spec": { "fields": [
+                { "source-id": 99, "name": "x", "transform": "identity" },
+            ]},
+        })),
+    )
+    .await;
+    assert_eq!(status.1, StatusCode::BAD_REQUEST);
+    assert_error(&body, 400, "BadRequestException");
+
+    // ... and duplicate sibling field names (unresolvable once ids are
+    // reassigned).
+    let (status, body) = send(
+        &ctx.router,
+        "POST",
+        &format!("/v1/{}/namespaces/db/tables", ctx.warehouse),
+        None,
+        Some(json!({
+            "name": "broken2",
+            "schema": { "type": "struct", "fields": [
+                { "id": 0, "name": "x", "required": true, "type": "long" },
+                { "id": 1, "name": "x", "required": true, "type": "string" },
+            ]},
+        })),
+    )
+    .await;
+    assert_eq!(status.1, StatusCode::BAD_REQUEST);
+    assert_error(&body, 400, "BadRequestException");
+}
+
 // ---------------------------------------------------------------------------
 // Load / HEAD / ETag
 // ---------------------------------------------------------------------------

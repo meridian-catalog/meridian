@@ -662,3 +662,85 @@ async fn view_listing_paginates() {
     assert_eq!(body["identifiers"][0]["name"], "v2");
     assert!(body["next-page-token"].is_null());
 }
+
+// ---------------------------------------------------------------------------
+// Create-request field ids are provisional (mirrors createTable)
+// ---------------------------------------------------------------------------
+
+/// The exact request shape Spark 3.5's `CREATE VIEW` sends (0-based field
+/// ids, previously rejected with `field id 0 is not positive`) must
+/// succeed, with fresh 1-based ids assigned server-side — the same
+/// provisional-id treatment `createTable` applies.
+#[tokio::test]
+async fn create_view_treats_request_field_ids_as_provisional() {
+    let Some(ctx) = test_ctx().await else { return };
+    make_namespace(&ctx, "db").await;
+
+    let (status, body) = send(
+        &ctx.router,
+        "POST",
+        &format!("/v1/{}/namespaces/db/views", ctx.warehouse),
+        Some(json!({
+            "name": "orders_by_category",
+            "schema": {
+                "type": "struct",
+                "schema-id": 0,
+                "fields": [
+                    { "id": 0, "name": "category", "required": false, "type": "string" },
+                    { "id": 1, "name": "cnt", "required": false, "type": "long" },
+                    { "id": 2, "name": "total_amount", "required": false, "type": "double" },
+                ],
+            },
+            "view-version": {
+                "version-id": 1,
+                "timestamp-ms": 1_700_000_000_000i64,
+                "schema-id": 0,
+                "summary": { "engine-name": "spark", "engine-version": "3.5.6" },
+                "representations": [
+                    { "type": "sql",
+                      "sql": "SELECT category, count(*) AS cnt FROM db.orders GROUP BY category",
+                      "dialect": "spark" },
+                ],
+                "default-namespace": ["db"],
+            },
+            "properties": {},
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "Spark-shaped create view: {body}");
+    let fields = body["metadata"]["schemas"][0]["fields"]
+        .as_array()
+        .expect("schema fields");
+    let ids: Vec<i64> = fields.iter().map(|f| f["id"].as_i64().unwrap()).collect();
+    assert_eq!(ids, vec![1, 2, 3], "fresh 1-based ids: {body}");
+
+    // Genuinely broken requests still fail: duplicate sibling field names
+    // are unresolvable once ids are reassigned.
+    let (status, body) = send(
+        &ctx.router,
+        "POST",
+        &format!("/v1/{}/namespaces/db/views", ctx.warehouse),
+        Some(json!({
+            "name": "broken",
+            "schema": {
+                "type": "struct",
+                "fields": [
+                    { "id": 0, "name": "dup", "required": false, "type": "string" },
+                    { "id": 1, "name": "dup", "required": false, "type": "long" },
+                ],
+            },
+            "view-version": {
+                "version-id": 1,
+                "timestamp-ms": 1_700_000_000_000i64,
+                "schema-id": 0,
+                "summary": {},
+                "representations": [
+                    { "type": "sql", "sql": "SELECT 1", "dialect": "spark" },
+                ],
+                "default-namespace": ["db"],
+            },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "duplicate names: {body}");
+}
