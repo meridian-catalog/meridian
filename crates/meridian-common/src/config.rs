@@ -37,6 +37,57 @@ pub struct AppConfig {
     pub auth: AuthConfig,
     /// Event delivery settings (outbox relay, webhooks).
     pub events: EventsConfig,
+    /// Server-side scan planning settings.
+    pub planning: PlanningConfig,
+}
+
+/// Server-side scan-planning settings (`[planning]`): the IRC
+/// `planTableScan` / `fetchPlanningResult` / `fetchScanTasks` surface.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PlanningConfig {
+    /// Master switch. When `false` the planning endpoints return 406
+    /// `UnsupportedOperationException` and are not advertised in
+    /// `GET /v1/config`.
+    pub enabled: bool,
+    /// Tables whose snapshot tracks at most this many live data files
+    /// (counted from the manifest list) are planned synchronously, with
+    /// the full result inline in the planTableScan response. Larger
+    /// tables get the asynchronous submitted/poll/fetch flow.
+    pub sync_max_data_files: i64,
+    /// File-scan tasks per result page on the asynchronous path.
+    pub page_size_files: usize,
+    /// Maximum concurrently running asynchronous plans per pod; further
+    /// submissions are rejected with 503 until capacity frees up.
+    pub max_concurrent_plans: usize,
+    /// Plan (and result page) time-to-live in seconds. Expired plan-ids
+    /// answer 404, matching the spec's "plan-id is invalid" semantics.
+    pub plan_ttl_secs: u64,
+    /// Interval of the background sweep that deletes expired plans and
+    /// enforces the Postgres manifest-cache budget, in seconds.
+    pub sweep_interval_secs: u64,
+    /// In-process manifest LRU budget in bytes. The accounting unit is
+    /// the *estimated parsed size* of each manifest (see
+    /// `meridian-server`'s planning cache), not its raw file size.
+    pub cache_max_bytes: u64,
+    /// Total budget in bytes for the cross-pod manifest byte cache in
+    /// Postgres (raw file bytes). `0` disables that cache tier entirely.
+    pub pg_cache_max_bytes: u64,
+}
+
+impl Default for PlanningConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            sync_max_data_files: 2_000,
+            page_size_files: 500,
+            max_concurrent_plans: 4,
+            plan_ttl_secs: 3_600,
+            sweep_interval_secs: 60,
+            cache_max_bytes: 256 * 1024 * 1024,
+            pg_cache_max_bytes: 1024 * 1024 * 1024,
+        }
+    }
 }
 
 /// Event delivery settings (`[events]`): the outbox relay and the webhook

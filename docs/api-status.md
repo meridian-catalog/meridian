@@ -73,8 +73,8 @@ piece is missing · **Not yet** — returns 404/405.
 | Operation | Endpoint | Status | Notes |
 |---|---|---|---|
 | `listTables` | `GET .../namespaces/{ns}/tables` | Implemented | Pagination: see divergence (a). |
-| `createTable` | `POST .../namespaces/{ns}/tables` | Implemented | `stage-create` supported (metadata returned, nothing persisted until the create transaction commits with `assert-create`). `format-version` property selects format 1–3 (default 2). Request field ids are treated as provisional, like the Java reference (`AssignFreshIds`): the server assigns fresh 1-based ids (nested types included) and remaps `identifier-field-ids` and partition-spec/sort-order source ids; a requested partition spec becomes the table's only spec, `spec-id: 0` (divergence (d), resolved). Flink's 0-based connector ids, which used to be rejected, are covered by the [Flink smoke](../conformance/engines/flink/README.md). `X-Iceberg-Access-Delegation: vended-credentials` vends read-write credentials on warehouses that opted in (see [Credential vending](#credential-vending)); otherwise `config` carries the warehouse's non-secret storage options only (see [Storage config passthrough](#storage-config-passthrough)). `stage-create` responses never vend (no table exists yet). Name collisions with views: see divergence (g). |
-| `loadTable` | `GET .../tables/{table}` | Implemented | `snapshots=all\|refs`; strong `ETag` and `If-None-Match` → 304 (see [ETags](#etags)). `X-Iceberg-Access-Delegation: vended-credentials` vends per-table credentials on opted-in warehouses — read-write for `WRITE`/`COMMIT` holders, read-only for `READ`-only holders (see [Credential vending](#credential-vending)); `remote-signing` alone → 400 (not implemented). Otherwise `config` carries non-secret storage options only (see [Storage config passthrough](#storage-config-passthrough)). |
+| `createTable` | `POST .../namespaces/{ns}/tables` | Implemented | `stage-create` supported (metadata returned, nothing persisted until the create transaction commits with `assert-create`). `format-version` property selects format 1–3 (default 2). Request field ids are treated as provisional, like the Java reference (`AssignFreshIds`): the server assigns fresh 1-based ids (nested types included) and remaps `identifier-field-ids` and partition-spec/sort-order source ids; a requested partition spec becomes the table's only spec, `spec-id: 0` (divergence (d), resolved). Flink's 0-based connector ids, which used to be rejected, are covered by the [Flink smoke](../conformance/engines/flink/README.md). `X-Iceberg-Access-Delegation: vended-credentials` vends read-write credentials on warehouses that opted in (see [Credential vending](#credential-vending)); `remote-signing` (alone) advertises the sign endpoint instead (see [Remote signing](#remote-signing)); otherwise `config` carries the warehouse's non-secret storage options only (see [Storage config passthrough](#storage-config-passthrough)). `stage-create` responses never vend or advertise signing (no table exists yet). Name collisions with views: see divergence (g). |
+| `loadTable` | `GET .../tables/{table}` | Implemented | `snapshots=all\|refs`; strong `ETag` and `If-None-Match` → 304 (see [ETags](#etags)). `X-Iceberg-Access-Delegation: vended-credentials` vends per-table credentials on opted-in warehouses — read-write for `WRITE`/`COMMIT` holders, read-only for `READ`-only holders (see [Credential vending](#credential-vending)); `remote-signing` (alone) advertises the per-table sign endpoint instead (see [Remote signing](#remote-signing); when both are listed, vended credentials win). Otherwise `config` carries non-secret storage options only (see [Storage config passthrough](#storage-config-passthrough)). |
 | `updateTable` (commit) | `POST .../tables/{table}` | Implemented | The single-table commit path: requirements checked against the current metadata, unknown update/requirement types → 400 (as the spec requires), bounded compare-and-swap retry (409 `CommitFailedException` after 3 lost races), `assert-create` finalizes a stage-create transaction. `Idempotency-Key` honored (see [Idempotency keys](#idempotency-keys)). Exercised end-to-end by pyiceberg (appends, schema evolution, two concurrent writers), by Flink's checkpoint-driven streaming commits, and by Spark's merge-on-read row-level operations — `MERGE INTO` and `DELETE FROM` commit position-delete files through this path, and Trino reads the resulting table back exactly (cross-engine, verified) — see the [engine matrix](../conformance/engines/README.md). |
 | `dropTable` | `DELETE .../tables/{table}` | Implemented | `purgeRequested=true` semantics: see divergence (e). |
 | `tableExists` | `HEAD .../tables/{table}` | Implemented | 204 / 404. |
@@ -84,16 +84,31 @@ piece is missing · **Not yet** — returns 404/405.
 | `commitTransaction` | `POST /v1/{prefix}/transactions/commit` | Partial | Atomic multi-table commit: all requirements evaluated before anything is staged, **every** violation reported (not just the first), all pointers move in one database transaction or none do. `Idempotency-Key` honored. **Missing:** `assert-create` (staged creates) inside a transaction is rejected with 400. |
 | `unregisterTable` | `POST .../tables/{table}/unregister` | Not yet | |
 | `loadCredentials` | `GET .../tables/{table}/credentials` | Implemented | Per-table scoped credentials on warehouses that opted in via the `vending = "sts"` or `"static"` storage option; 400 on warehouses that did not (see [Credential vending](#credential-vending)). RBAC decides read vs read-write; every vend is audited. |
-| `signRequest` | `POST .../tables/{table}/sign` | Not yet | No remote request signing. |
+| `signRequest` | `POST .../tables/{table}/sign` | Implemented | S3 only (`provider` other than `s3` → 400). Requires the warehouse vending opt-in plus static keys in its storage options. The request must resolve inside the table's location prefix and within the caller's RBAC access (`GET`/`HEAD` with `READ`; `PUT`/`POST`/`DELETE` with `WRITE`/`COMMIT`); every decision is audited, denies included. See [Remote signing](#remote-signing). |
 
 ### Scan planning
 
-| Operation | Endpoint | Status |
-|---|---|---|
-| `planTableScan` | `POST .../tables/{table}/plan` | Not yet |
-| `fetchPlanningResult` | `GET .../tables/{table}/plan/{plan-id}` | Not yet |
-| `cancelPlanning` | `DELETE .../tables/{table}/plan/{plan-id}` | Not yet |
-| `fetchScanTasks` | `POST .../tables/{table}/tasks` | Not yet |
+Server-side scan planning per the 1.11+ REST surface (design:
+[docs/design/scan-planning.md](design/scan-planning.md)). Every endpoint
+requires `READ` on the table (the loadTable rule), re-checked on each
+call. Tables whose snapshot tracks at most `planning.sync_max_data_files`
+live data files (default 2000) are planned synchronously — `completed`
+with all file scan tasks inline; larger tables answer `submitted` and are
+planned on a bounded worker pool with results fetched page by page via
+opaque `plan-task` tokens. Plans expire after `planning.plan_ttl_secs`
+(default one hour); expired plan-ids are 404 `NoSuchPlanIdException`.
+Plan submission and cancellation are audited (`scan.plan`,
+`scan.plan_cancel`), submission also emits a `scan.planned` catalog
+event, and the expiry sweep audits each batch (`scan.plans_expired`).
+Disable the whole surface with `planning.enabled = false` (endpoints then
+answer 406 and are not advertised in `GET /v1/config`).
+
+| Operation | Endpoint | Status | Notes |
+|---|---|---|---|
+| `planTableScan` | `POST .../tables/{table}/plan` | Partial | Point-in-time scans: `snapshot-id` (default: current), `filter` (full expression pushdown: manifest summaries → partition tuples → column stats), `case-sensitive`, `use-snapshot-schema`, `stats-fields` (trims returned column stats), `select` (validated; does not change the payload yet — the column-mask hook). Tasks carry `delete-file-references` (position/equality deletes attached by the spec's sequence-number and partition scope rules, deletion vectors supersede position delete files) and a per-file `residual-filter` (exact partition folding; the row-policy injection point). Verified against the conformance suite's real Spark merge-on-read table. **Missing:** incremental scans (`start-snapshot-id`/`end-snapshot-id`) → 406; `min-rows-requested` accepted and ignored; no `storage-credentials` in planning responses (use loadTable delegation); `Idempotency-Key` accepted but not deduplicated. |
+| `fetchPlanningResult` | `GET .../tables/{table}/plan/{plan-id}` | Implemented | `submitted`/`cancelled`/`failed`/`completed` per the spec's discriminated result. Completed synchronous plans re-plan from the stored request pinned to the plan's snapshot (deterministic on immutable metadata); completed asynchronous plans return `plan-tasks` page tokens. |
+| `cancelPlanning` | `DELETE .../tables/{table}/plan/{plan-id}` | Implemented | 204; drops persisted result pages, flips `submitted`/`completed` plans to `cancelled` (a racing worker's result is discarded), idempotent on terminal states. |
+| `fetchScanTasks` | `POST .../tables/{table}/tasks` | Implemented | One persisted page per `plan-task` token (single primary-key read); repeatable; unknown or expired tokens → 404 `NoSuchPlanTaskException`. Page-local `delete-file-references` indices; each page carries exactly the delete files its tasks reference. |
 
 ### Views
 
@@ -284,9 +299,55 @@ opts in through storage options:
   access, mode, TTL — in one transaction *before* credentials are
   returned.
 - Misconfigured vending options are rejected at warehouse create time.
-  `remote-signing` delegation is not implemented (400 when requested
-  alone); the vending header is ignored on warehouses with
-  `vending = "none"` (pyiceberg sends it by default).
+  The vending header is ignored on warehouses with `vending = "none"`
+  (pyiceberg sends it by default).
+
+## Remote signing
+
+The spec's second delegation mechanism (`X-Iceberg-Access-Delegation:
+remote-signing`), implemented per ADR
+[005](adr/005-remote-signing.md): instead of shipping credentials, the
+catalog signs each client-built S3 request at
+`POST .../tables/{table}/sign` (the spec's
+`RemoteSignRequest`/`RemoteSignResult`) with the warehouse's keys, which
+never leave the server.
+
+- **Opt-in and keys**: rides the same `vending = "sts" | "static"` opt-in;
+  additionally requires `access-key-id`/`secret-access-key` in the
+  warehouse storage options (warehouses on ambient AWS credentials get a
+  400 from the sign endpoint — no credentials-provider path yet).
+- **Advertisement**: a table load/create carrying `remote-signing` (and
+  not `vended-credentials`, which wins when both are listed) gets
+  `s3.remote-signing-enabled=true`, a **relative** `s3.signer.endpoint`
+  (per-table sign path; `s3.signer.uri` is left to its spec default, the
+  catalog base URI), and `s3.signer=S3V4RestSigner` (pyiceberg's fsspec
+  activation property; inert elsewhere) in `LoadTableResult.config`.
+- **Authorization is the boundary** (signatures use warehouse-wide keys):
+  the request URI must resolve inside the table's location prefix —
+  path-style or virtual-host, percent-decoded, `.`/`..` segments denied,
+  host restricted to the warehouse's endpoints; `GET`/`HEAD` need `READ`,
+  `PUT`/`POST`/`DELETE` need `WRITE`/`COMMIT`; governance subresources
+  (`?acl`, `?policy`, `?tagging`, ...) are never signed;
+  `x-amz-copy-source` must also stay inside the table; bucket-root
+  requests are limited to listings with an in-prefix `prefix` parameter
+  and `DeleteObjects` with every body key validated.
+- **Auditing**: every decision — allow *and* deny — writes an `audit_log`
+  row (`credential.sign`: principal, table, method, decoded keys,
+  decision, deny reason) and an outbox event (`credential.signed` /
+  `credential.sign-denied`) in one transaction before the response leaves.
+- **Caching**: signed `GET`/`HEAD` responses carry `Cache-Control:
+  private` (spec-following clients may reuse them within the SigV4
+  validity window); writes carry `no-cache`.
+- **Cost, honestly**: every uncached object request from a remote-signing
+  client is one catalog round trip plus one audit transaction. Table
+  locations are cached in-process (keyed by the commit pointer version),
+  so steady-state signing does not re-read `metadata.json`.
+- Verified end to end against MinIO (sign → execute → 200; sibling-table
+  and read-only-PUT attempts → 403 + audit row) and with a real pyiceberg
+  0.11 client holding zero S3 configuration
+  ([e2e](../conformance/e2e/tests/test_remote_signing.py) — requires the
+  fsspec FileIO; pyiceberg's pyarrow FileIO has no remote-signing
+  support). **Not yet cloud-verified against real AWS.**
 
 ## Idempotency keys
 

@@ -12,6 +12,73 @@ releases begin, the project will adhere to
 
 ### Added
 
+- **Server-side scan planning** (IRC 1.11+ `planTableScan` /
+  `fetchPlanningResult` / `cancelPlanning` / `fetchScanTasks`;
+  [design doc](docs/design/scan-planning.md),
+  [API status → Scan planning](docs/api-status.md#scan-planning)).
+  Point-in-time scans with full filter pushdown (manifest partition
+  summaries → partition tuples → column statistics, all inclusive),
+  position/equality delete files attached to each task by the table
+  spec's sequence-number and partition scope rules (deletion vectors
+  supersede position delete files; equality deletes stats-pruned only
+  over their equality columns), and per-file `residual-filter`s with
+  exact partition folding — the future row-policy injection point.
+  Small tables (≤ 2000 live data files by default) answer `completed`
+  inline; larger tables run on a bounded async pool with persisted,
+  deterministically paginated results fetched by opaque `plan-task`
+  tokens, a TTL (default 1 h), cancellation, and an expiry sweep.
+  Manifests are cached in two bounded tiers (in-process parsed LRU +
+  cross-pod Postgres byte cache, migration 0011) with hit counters in
+  every plan summary; plan submission/cancellation are audited and
+  submission emits a `scan.planned` event. `READ` on the table is
+  enforced on every call. Verified against the conformance suite's real
+  Spark merge-on-read table (exact live-row reproduction) and a
+  synthetic 10,000-file fixture; incremental scans are refused with 406
+  (not yet implemented).
+  (`meridian-iceberg`; groundwork for IRC scan planning — no new
+  endpoints yet). Reading of manifest lists and manifests (v1 and v2)
+  resolves fields by Iceberg **field id** from the writer schema rather
+  than by name or position, tolerating the historical v1 field
+  spellings and int→long / float→double bound promotions; the v3
+  additions (deletion-vector `content_offset`/`content_size_in_bytes`,
+  `referenced_data_file`, `first_row_id`) are parsed and preserved but
+  not interpreted. Writing emits spec-shaped v1/v2 manifests and
+  manifest lists (field-id attributes, key-value metadata, deflate) and
+  refuses v3-only fields rather than dropping them; written files were
+  verified readable by pyiceberg. Typed single values (`Datum`) cover
+  every primitive incl. decimal/uuid/timestamp bound decoding
+  (Appendix D binary and REST JSON forms). The REST
+  `PlanTableScanRequest.filter` expression tree (exact OpenAPI names)
+  binds against a schema, rewrites `not` away, and evaluates
+  three-valued ("unknown keeps the file") against data-file column
+  statistics, partition tuples, and manifest-list partition summaries
+  via the spec's inclusive projection (identity/bucket/truncate/
+  temporal transforms; 32-bit Murmur3 verified against every spec
+  Appendix B test vector). Conformance evidence: parsed manifests match
+  pyiceberg's own view field-for-field on pyiceberg-written v1/v2
+  tables and on the conformance suite's real Spark merge-on-read table
+  (position deletes included), and a property suite asserts the
+  soundness invariant — a file containing a row matching the filter is
+  never pruned by any evaluator.
+- **Remote signing (`X-Iceberg-Access-Delegation: remote-signing`)**
+  ([ADR 005](docs/adr/005-remote-signing.md),
+  [API status → Remote signing](docs/api-status.md#remote-signing)). The
+  spec's second delegation mechanism: `POST .../tables/{table}/sign`
+  SigV4-signs client-built S3 requests with warehouse credentials that
+  never leave the server. Rides the vending opt-in
+  (`vending = "sts" | "static"`). The authorization policy is the
+  boundary: requests must resolve inside the table's location prefix
+  (path-style and virtual-host addressing, percent-decoding, traversal
+  and copy-source checks, endpoint-host allowlist, scoped bucket listings,
+  `DeleteObjects` body-key validation) and within the caller's RBAC access
+  (`GET`/`HEAD` with `READ`; writes with `WRITE`/`COMMIT`). Every
+  decision — allow and deny — writes an audit row and outbox event in one
+  transaction before the response leaves. Table loads/creates carrying
+  the header advertise `s3.remote-signing-enabled` plus a relative
+  `s3.signer.endpoint` (vended credentials keep precedence when both
+  mechanisms are listed). Verified sign→execute against MinIO and end to
+  end with a credential-less pyiceberg 0.11 client (fsspec FileIO); not
+  yet cloud-verified against real AWS.
 - **Credential vending (S3/MinIO) and external endpoint advertisement**
   ([docs/design/vending.md](docs/design/vending.md)). New
   `meridian-vending` crate plus the IRC surfaces: `GET
@@ -28,7 +95,7 @@ releases begin, the project will adhere to
   otherwise), GCS/Azure honestly refuse as not implemented. Access follows
   RBAC (`WRITE`/`COMMIT` → read-write, `READ` → read-only) and **every
   vend writes an audit row and outbox event in one transaction before
-  credentials leave the server**. `remote-signing` is an honest 400. The
+  credentials leave the server**. The
   new `endpoint.external` storage option makes all client-facing config
   advertise an external object-storage endpoint while the server keeps
   using the internal one — the fix for the documented

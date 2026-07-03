@@ -45,6 +45,7 @@ E2E_RUN_ID=$(date +%s) uv run pytest tests/test_pyiceberg_fs.py -v
 | `test_duckdb_read.py` | DuckDB iceberg extension | `file:///tmp` | read a pyiceberg-written, Meridian-committed table (REST `ATTACH` first, `iceberg_scan` fallback) |
 | `test_concurrent_writers.py` | pyiceberg x2 | `file:///tmp` | two catalog instances appending concurrently to one table |
 | `test_views.py` | pyiceberg + raw REST | `file:///tmp` | view lifecycle: create (two SQL dialects) / load / replace / rename / collision 409s via raw REST; `list_views`, `view_exists`, `drop_view` via pyiceberg (its RestCatalog implements only those three view operations as of 0.11.x — no `create_view`/`load_view` yet, hence the raw-requests half) |
+| `test_remote_signing.py` | pyiceberg (fsspec FileIO) | `s3://` (MinIO) | write + scan with **zero client-side keys** via `X-Iceberg-Access-Delegation: remote-signing`: every object request signed through `POST .../tables/{table}/sign`; also asserts the advertisement carries no credential-shaped keys and that the signer refuses foreign objects (403). pyiceberg's pyarrow FileIO has no remote-signing support as of 0.11.x, hence the `py-io-impl` pin |
 
 Every pyiceberg HTTP interaction is watched through a response hook: any
 5xx from the server fails the test that triggered it.
@@ -62,4 +63,7 @@ and opt-in: `test_vended_credentials.py` runs a warehouse with
 `vending = "sts"` against MinIO's STS endpoint, and its pyiceberg client
 holds zero S3 configuration — scoped, short-lived session credentials
 arrive from the catalog, and a boto3 check proves they cannot cross into
-a sibling table's prefix.
+a sibling table's prefix. Remote **signing** (`test_remote_signing.py`)
+is the credential-free alternative: the client asks for the
+`remote-signing` delegation and the catalog signs each S3 request at the
+per-table sign endpoint — no keys of any kind reach the client.

@@ -23,7 +23,11 @@ Two client surfaces, per the Iceberg REST spec:
   `storage-credentials` field (what newer clients prefer). pyiceberg sends
   this header by default, which is why a warehouse without vending enabled
   ignores it rather than erroring.
-- `remote-signing` (alone) is a 400: not implemented yet, said plainly.
+- `remote-signing` (alone) switches the table onto the per-table sign
+  endpoint (`POST .../tables/{table}/sign`) instead of shipping
+  credentials — see [ADR 005](../adr/005-remote-signing.md) and the
+  [remote signing section of the API status page](../api-status.md#remote-signing).
+  When both mechanisms are listed, vended credentials win.
 
 ## Warehouse opt-in (storage options)
 
