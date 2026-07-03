@@ -271,6 +271,13 @@ pub struct ServerConfig {
     pub request_timeout_secs: u64,
     /// Maximum accepted request body size in bytes.
     pub max_body_bytes: usize,
+    /// Browser origins permitted by CORS. Engines are not browsers and are
+    /// unaffected by this; it exists so the web console (a separate-origin
+    /// client) can call the API. The default allows the console on its usual
+    /// localhost dev ports. Set to `["*"]` to allow any origin (credentials
+    /// are then disallowed per the CORS spec), or `[]` to disable CORS
+    /// entirely.
+    pub cors_allowed_origins: Vec<String>,
 }
 
 impl Default for ServerConfig {
@@ -280,6 +287,10 @@ impl Default for ServerConfig {
             port: 8181,
             request_timeout_secs: 30,
             max_body_bytes: 16 * 1024 * 1024,
+            cors_allowed_origins: vec![
+                "http://localhost:3000".to_owned(),
+                "http://localhost:3100".to_owned(),
+            ],
         }
     }
 }

@@ -53,6 +53,16 @@ Configuration is layered: defaults < `meridian.toml` (or `--config <path>`)
 nesting, e.g. `MERIDIAN__SERVER__PORT=8282`,
 `MERIDIAN__TELEMETRY__FORMAT=json`).
 
+### CORS (for the web console)
+
+Query engines are not browsers and never trigger CORS. The browser
+console is a separate-origin client, so the server applies CORS to the
+origins in `server.cors_allowed_origins` (default: `http://localhost:3000`
+and `http://localhost:3100`, the console's dev ports). Override with
+`MERIDIAN__SERVER__CORS_ALLOWED_ORIGINS='["https://console.example.com"]'`,
+set `["*"]` to allow any origin (credentials then disabled per the CORS
+spec), or `[]` to turn CORS off entirely.
+
 ## Tests
 
 Unit tests run with no external services. Database and HTTP integration tests

@@ -6,12 +6,13 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::Request;
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::routing::{delete, get, post};
 use meridian_common::{AppConfig, MeridianError, Result};
 use sqlx::PgPool;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::request_id::{
     MakeRequestId, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
@@ -55,6 +56,7 @@ pub fn build_router(state: AppState) -> Router {
     let server = &state.config.server;
     let request_timeout = Duration::from_secs(server.request_timeout_secs);
     let max_body_bytes = server.max_body_bytes;
+    let cors_origins = server.cors_allowed_origins.clone();
     // Authentication middleware state (JWKS caches, JIT-provisioning
     // cache). Constructed once; logs the loud warning when auth is
     // disabled and fails closed when OIDC setup is broken.
@@ -246,34 +248,79 @@ pub fn build_router(state: AppState) -> Router {
         ))
         .layer(axum::Extension(planning_runtime));
 
-    routes.layer(
-        ServiceBuilder::new()
-            .layer(SetRequestIdLayer::x_request_id(MakeUlidRequestId))
-            .layer(
-                TraceLayer::new_for_http().make_span_with(|request: &Request| {
-                    let request_id = request
-                        .headers()
-                        .get("x-request-id")
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("unknown");
-                    tracing::info_span!(
-                        "http_request",
-                        method = %request.method(),
-                        uri = %request.uri(),
-                        request_id,
-                    )
-                }),
-            )
-            .layer(PropagateRequestIdLayer::x_request_id())
-            // Body limit sits outside the timeout so the timeout is the
-            // innermost wrapper around routes (its synthesized timeout
-            // response needs the plain axum body type).
-            .layer(RequestBodyLimitLayer::new(max_body_bytes))
-            .layer(TimeoutLayer::with_status_code(
-                StatusCode::REQUEST_TIMEOUT,
-                request_timeout,
-            )),
-    )
+    routes
+        .layer(
+            ServiceBuilder::new()
+                .layer(SetRequestIdLayer::x_request_id(MakeUlidRequestId))
+                .layer(
+                    TraceLayer::new_for_http().make_span_with(|request: &Request| {
+                        let request_id = request
+                            .headers()
+                            .get("x-request-id")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("unknown");
+                        tracing::info_span!(
+                            "http_request",
+                            method = %request.method(),
+                            uri = %request.uri(),
+                            request_id,
+                        )
+                    }),
+                )
+                .layer(PropagateRequestIdLayer::x_request_id())
+                // Body limit sits outside the timeout so the timeout is the
+                // innermost wrapper around routes (its synthesized timeout
+                // response needs the plain axum body type).
+                .layer(RequestBodyLimitLayer::new(max_body_bytes))
+                .layer(TimeoutLayer::with_status_code(
+                    StatusCode::REQUEST_TIMEOUT,
+                    request_timeout,
+                )),
+        )
+        // CORS is the outermost layer so a browser preflight (OPTIONS) is
+        // answered by the CORS layer itself — before auth, the body limit,
+        // or route matching (which would otherwise 405 the OPTIONS). Only
+        // browsers send `Origin`; engines are unaffected.
+        .layer(cors_layer(&cors_origins))
+}
+
+/// Builds the CORS layer from the configured browser origins.
+///
+/// Empty list → no CORS headers (browsers blocked, engines unaffected).
+/// `["*"]` → any origin, but without credentials (the CORS spec forbids
+/// `Allow-Credentials: true` alongside a wildcard). Otherwise an explicit
+/// allow-list that permits credentialed requests (bearer tokens).
+fn cors_layer(origins: &[String]) -> CorsLayer {
+    use axum::http::Method;
+    use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
+
+    let base = CorsLayer::new()
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::HEAD,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            AUTHORIZATION,
+            CONTENT_TYPE,
+            // Iceberg clients set these; harmless for the console.
+            HeaderName::from_static("x-iceberg-access-delegation"),
+            HeaderName::from_static("idempotency-key"),
+        ])
+        .expose_headers([HeaderName::from_static("etag")]);
+
+    if origins.iter().any(|o| o == "*") {
+        base.allow_origin(AllowOrigin::any())
+    } else {
+        let parsed: Vec<HeaderValue> = origins
+            .iter()
+            .filter_map(|o| o.parse::<HeaderValue>().ok())
+            .collect();
+        base.allow_origin(parsed).allow_credentials(true)
+    }
 }
 
 /// Binds the configured address and serves until SIGTERM/ctrl-c.
