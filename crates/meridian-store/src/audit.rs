@@ -265,11 +265,99 @@ pub async fn append_in_tx(
     Ok(record)
 }
 
-/// Verifies the entire audit chain, returning the number of entries checked.
-///
-/// Fails with [`MeridianError::Internal`] at the first entry whose linkage or
-/// hash does not recompute.
-pub async fn verify_chain(pool: &PgPool) -> Result<u64> {
+/// Filters for querying the audit log. All filters are conjunctive; unset
+/// fields do not constrain the result.
+#[derive(Debug, Clone, Default)]
+pub struct AuditQuery {
+    /// Exact workspace-id match.
+    pub workspace_id: Option<String>,
+    /// Exact principal match (audit strings, e.g. `user:alice@example.com`).
+    pub principal: Option<String>,
+    /// Exact action match, e.g. `table.commit`.
+    pub action_exact: Option<String>,
+    /// Action prefix match, e.g. `table.` (from a `table.*` filter).
+    pub action_prefix: Option<String>,
+    /// Exact resource match, e.g. `table:01J...`.
+    pub resource: Option<String>,
+    /// Only entries at or after this instant.
+    pub from: Option<DateTime<Utc>>,
+    /// Only entries at or before this instant.
+    pub to: Option<DateTime<Utc>>,
+    /// Keyset cursor: only entries with `seq` strictly below this.
+    pub before_seq: Option<i64>,
+    /// Page size (callers clamp; passed to `LIMIT` verbatim).
+    pub limit: i64,
+}
+
+/// Queries the audit log, newest first (`seq` descending), with keyset
+/// pagination via [`AuditQuery::before_seq`].
+pub async fn query(pool: &PgPool, query: &AuditQuery) -> Result<Vec<AuditRecord>> {
+    let mut builder = sqlx::QueryBuilder::new(
+        "SELECT seq, id, workspace_id, occurred_at, principal, action, resource, details, \
+         prev_hash, hash FROM audit_log WHERE TRUE",
+    );
+    if let Some(workspace_id) = &query.workspace_id {
+        builder.push(" AND workspace_id = ").push_bind(workspace_id);
+    }
+    if let Some(principal) = &query.principal {
+        builder.push(" AND principal = ").push_bind(principal);
+    }
+    if let Some(action) = &query.action_exact {
+        builder.push(" AND action = ").push_bind(action);
+    }
+    if let Some(prefix) = &query.action_prefix {
+        // starts_with avoids LIKE-pattern escaping for user input.
+        builder
+            .push(" AND starts_with(action, ")
+            .push_bind(prefix)
+            .push(")");
+    }
+    if let Some(resource) = &query.resource {
+        builder.push(" AND resource = ").push_bind(resource);
+    }
+    if let Some(from) = query.from {
+        builder.push(" AND occurred_at >= ").push_bind(from);
+    }
+    if let Some(to) = query.to {
+        builder.push(" AND occurred_at <= ").push_bind(to);
+    }
+    if let Some(before_seq) = query.before_seq {
+        builder.push(" AND seq < ").push_bind(before_seq);
+    }
+    builder
+        .push(" ORDER BY seq DESC LIMIT ")
+        .push_bind(query.limit);
+
+    builder
+        .build_query_as()
+        .fetch_all(pool)
+        .await
+        .map_err(|e| map_sqlx_error("failed to query audit log", e))
+}
+
+/// Outcome of a full chain verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainVerification {
+    /// Entries whose linkage and hash recomputed correctly. When the chain
+    /// is broken this counts the entries *before* the break.
+    pub entries_checked: u64,
+    /// Chain position of the first broken entry, if any.
+    pub broken_at: Option<i64>,
+    /// Human-readable description of the break, if any.
+    pub error: Option<String>,
+}
+
+impl ChainVerification {
+    /// Whether the whole chain verified.
+    #[must_use]
+    pub fn valid(&self) -> bool {
+        self.broken_at.is_none()
+    }
+}
+
+/// Verifies the entire audit chain and reports the outcome (a broken chain
+/// is a *report*, not an `Err`; errors are reserved for database failures).
+pub async fn verify_chain_report(pool: &PgPool) -> Result<ChainVerification> {
     let records: Vec<AuditRecord> = sqlx::query_as(
         "SELECT seq, id, workspace_id, occurred_at, principal, action, resource, details,
                 prev_hash, hash
@@ -285,10 +373,14 @@ pub async fn verify_chain(pool: &PgPool) -> Result<u64> {
 
     for record in records {
         if record.prev_hash != expected_prev {
-            return Err(MeridianError::internal_msg(format!(
-                "audit chain broken at seq {}: prev_hash linkage mismatch",
-                record.seq
-            )));
+            return Ok(ChainVerification {
+                entries_checked: checked,
+                broken_at: Some(record.seq),
+                error: Some(format!(
+                    "audit chain broken at seq {}: prev_hash linkage mismatch",
+                    record.seq
+                )),
+            });
         }
 
         let content = entry_content(
@@ -302,17 +394,37 @@ pub async fn verify_chain(pool: &PgPool) -> Result<u64> {
         );
         let recomputed = compute_hash(record.prev_hash.as_deref(), &content);
         if recomputed != record.hash {
-            return Err(MeridianError::internal_msg(format!(
-                "audit chain broken at seq {}: hash does not recompute",
-                record.seq
-            )));
+            return Ok(ChainVerification {
+                entries_checked: checked,
+                broken_at: Some(record.seq),
+                error: Some(format!(
+                    "audit chain broken at seq {}: hash does not recompute",
+                    record.seq
+                )),
+            });
         }
 
         expected_prev = Some(record.hash);
         checked += 1;
     }
 
-    Ok(checked)
+    Ok(ChainVerification {
+        entries_checked: checked,
+        broken_at: None,
+        error: None,
+    })
+}
+
+/// Verifies the entire audit chain, returning the number of entries checked.
+///
+/// Fails with [`MeridianError::Internal`] at the first entry whose linkage or
+/// hash does not recompute.
+pub async fn verify_chain(pool: &PgPool) -> Result<u64> {
+    let report = verify_chain_report(pool).await?;
+    match report.error {
+        None => Ok(report.entries_checked),
+        Some(message) => Err(MeridianError::internal_msg(message)),
+    }
 }
 
 #[cfg(test)]

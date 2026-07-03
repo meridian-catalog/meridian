@@ -206,6 +206,13 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v2/webhooks/{id}/deliveries",
             get(routes::events::list_webhook_deliveries),
         )
+        // Audit surface (log query + chain verification) — management-
+        // gated; see routes::audit for the pagination contract.
+        .route("/api/v2/audit", get(routes::audit::query_audit))
+        .route(
+            "/api/v2/audit/verify",
+            get(routes::audit::verify_audit_chain),
+        )
         .route("/api/v2/events", get(routes::events::list_events))
         .route(
             "/api/v2/events/consumers",
