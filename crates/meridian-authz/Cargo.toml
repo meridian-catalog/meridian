@@ -1,0 +1,28 @@
+[package]
+name = "meridian-authz"
+description = "Meridian attribute-based access control: Cedar policy evaluation, and row-filter/column-mask resolution for scan-plan enforcement (Pillar D / D-F1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The Cedar policy engine. Default features include the `datetime` extension
+# (time-bound grants) and `decimal`/`ipaddr`; see ADR 009 for why Cedar.
+cedar-policy = { workspace = true }
+# The IRC scan-filter expression tree. Row-filter policies compile to this
+# exact type so the scan-plan enforcement seam (D-F2.1) consumes them
+# without a lossy re-encoding.
+meridian-iceberg = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

@@ -4,6 +4,7 @@ members = [
     "crates/meridian-common",
     "crates/meridian-store",
     "crates/meridian-iceberg",
+    "crates/meridian-authz",
     "crates/meridian-storage",
     "crates/meridian-vending",
     "crates/meridian-executor",
@@ -25,6 +26,7 @@ rust-version = "1.88"
 meridian-common = { path = "crates/meridian-common" }
 meridian-store = { path = "crates/meridian-store" }
 meridian-iceberg = { path = "crates/meridian-iceberg" }
+meridian-authz = { path = "crates/meridian-authz" }
 meridian-storage = { path = "crates/meridian-storage" }
 meridian-vending = { path = "crates/meridian-vending" }
 meridian-executor = { path = "crates/meridian-executor" }
@@ -82,6 +84,12 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 
 # OIDC bearer-token validation (server authn)
 jsonwebtoken = "9.3"
+
+# ABAC policy engine (Pillar D / D-F1; ADR 009). Default features carry the
+# datetime extension (time-bound grants), decimal, and ipaddr. AWS/Amazon's
+# Cedar: policy-as-code with a formally verified evaluator and an explicit
+# forbid-overrides-permit (deny-wins) model.
+cedar-policy = "4.11"
 
 # Credential vending: STS AssumeRole (AWS + MinIO). rustls everywhere, no
 # system OpenSSL, matching the reqwest configuration above.
