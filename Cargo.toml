@@ -6,6 +6,7 @@ members = [
     "crates/meridian-iceberg",
     "crates/meridian-storage",
     "crates/meridian-vending",
+    "crates/meridian-executor",
     "crates/meridian-server",
     "crates/meridian-cli",
     "testing/bench",
@@ -25,6 +26,7 @@ meridian-store = { path = "crates/meridian-store" }
 meridian-iceberg = { path = "crates/meridian-iceberg" }
 meridian-storage = { path = "crates/meridian-storage" }
 meridian-vending = { path = "crates/meridian-vending" }
+meridian-executor = { path = "crates/meridian-executor" }
 meridian-server = { path = "crates/meridian-server" }
 
 # Async runtime

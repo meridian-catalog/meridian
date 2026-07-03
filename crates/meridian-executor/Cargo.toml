@@ -1,0 +1,50 @@
+[package]
+name = "meridian-executor"
+description = "Built-in maintenance executors for Meridian: the compaction (bin-pack rewrite) engine that produces auditable RewriteFiles commit plans"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+meridian-iceberg = { workspace = true }
+meridian-storage = { workspace = true }
+
+async-trait = "0.1"
+bytes = "1.10"
+futures = "0.3"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+
+# Parquet read/write over Arrow in-memory batches. `arrow` feature brings the
+# Arrow reader/writer; snap/zstd cover the compression codecs engines emit
+# (Spark defaults to zstd; Snowflake/pyiceberg often snappy). See ADR 007 for
+# why arrow+parquet directly instead of DataFusion, and the pinned feature set.
+arrow-array = { version = "59", default-features = false }
+arrow-schema = { version = "59", default-features = false }
+arrow-select = { version = "59", default-features = false }
+parquet = { version = "59", default-features = false, features = [
+    "arrow",
+    "snap",
+    "zstd",
+] }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = "3.20"
+async-trait = "0.1"
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+# Tests build synthetic Parquet fixtures and read compacted output back.
+arrow-array = { version = "59", default-features = false }
+arrow-schema = { version = "59", default-features = false }
+parquet = { version = "59", default-features = false, features = ["arrow", "zstd"] }
+meridian-iceberg = { workspace = true }
+meridian-storage = { workspace = true }
+
+[lints]
+workspace = true
