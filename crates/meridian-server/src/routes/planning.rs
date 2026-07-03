@@ -34,7 +34,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use meridian_common::principal::Principal;
-use meridian_iceberg::expr::BoundPredicate;
+use meridian_iceberg::expr::{BoundPredicate, Expression};
 use meridian_iceberg::manifest::ManifestContentType;
 use meridian_iceberg::spec::{Schema, Snapshot, TableMetadata};
 use meridian_storage::{Storage, read_table_metadata};
@@ -48,12 +48,13 @@ use ulid::Ulid;
 
 use crate::AppState;
 use crate::error::ApiError;
+use crate::governance::{self, ScanPolicy, TableContext};
 use crate::planning::engine::{
     self, ManifestSource, PlanError, PlanOutcome, SerializeContext, plan_scan,
 };
 use crate::planning::rest::{FetchScanTasksRequest, PlanTableScanRequest};
 use crate::planning::{ManifestIo, PlanningRuntime};
-use crate::routes::grants::{namespace_scope_chain, require};
+use crate::routes::grants::{forbidden, namespace_scope_chain, require};
 use crate::routes::tables::{connect_storage, no_such_table, resolve_table};
 
 /// 406 `UnsupportedOperationException` (the spec's response for
@@ -105,6 +106,101 @@ async fn authorize_read(
     Ok((warehouse, levels, record))
 }
 
+/// The Meridian purpose-declaration header (purpose-based access, D-F1). A
+/// scan client declares its purpose here (e.g. `fraud_investigation`); a
+/// `pii:high` deny-unless-purpose policy consults it. Namespaced as a Meridian
+/// extension — the IRC plan request carries no purpose field.
+const PURPOSE_HEADER: &str = "x-meridian-purpose";
+
+/// Extracts the declared purpose from the request headers, if present and
+/// non-empty.
+fn purpose_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get(PURPOSE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+/// Resolves the ABAC decision for this plan and attaches the enforcement to
+/// `scan`. A full deny aborts with 403 (audited); an effective allow-with-
+/// restrictions is audited and its row filter + masked-column field ids are
+/// attached. A no-op decision (nothing applies) leaves `scan` untouched and
+/// writes no audit row (a plan that changes nothing needs no governance
+/// record — plan creation is audited separately by the store).
+async fn apply_enforcement(
+    state: &AppState,
+    principal: &Principal,
+    record: &TableRecord,
+    namespace_ids: &[String],
+    schema: &Schema,
+    purpose: Option<&str>,
+    scan: &mut ResolvedScan,
+) -> Result<(), ApiError> {
+    let table_ctx = TableContext {
+        table_id: &record.id,
+        namespace_ids,
+        schema,
+        owner: None,
+    };
+    let policy: ScanPolicy =
+        governance::resolve_scan_policy(&state.pool, principal, &table_ctx, purpose).await?;
+
+    if !policy.is_effective() {
+        return Ok(());
+    }
+
+    // Audit every governance decision that changes the result (deny, filter,
+    // or mask) — the audit trail is the product (D-F2). Its own transaction:
+    // the decision is recorded whether or not the plan later persists.
+    audit_enforcement(state, principal, record, &policy).await?;
+
+    if policy.denied {
+        return Err(forbidden(format!(
+            "access denied by policy: {}",
+            policy.reason
+        )));
+    }
+
+    // Map masked column *names* to scan-schema field ids; a mask on a column
+    // absent from the scan schema (dropped/renamed) is simply inert.
+    let mut strip_fields = BTreeSet::new();
+    for col in &policy.removed_columns {
+        if let Some(id) = engine::resolve_field_name(schema, col, true) {
+            strip_fields.insert(id);
+        }
+    }
+
+    scan.enforcement = ScanEnforcement {
+        row_policy: policy.row_filter,
+        strip_fields,
+    };
+    Ok(())
+}
+
+/// Writes one governance-decision audit row (append-only chain), recording the
+/// principal, table, applied policies, removed columns, and reason.
+async fn audit_enforcement(
+    state: &AppState,
+    principal: &Principal,
+    record: &TableRecord,
+    policy: &ScanPolicy,
+) -> Result<(), ApiError> {
+    meridian_store::audit::append(
+        &state.pool,
+        meridian_store::audit::NewAuditEntry {
+            workspace_id: Some(tenancy::default_workspace_id()),
+            principal: principal.audit_string(),
+            action: "governance.scan.enforced".to_owned(),
+            resource: format!("table:{}", record.id),
+            details: policy.audit_details(&record.id),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
 /// Parses an optional JSON request body with a real 400 on malformed
 /// JSON (an absent/empty body is a valid default request per the spec).
 fn parse_plan_request(body: &axum::body::Bytes) -> Result<PlanTableScanRequest, ApiError> {
@@ -133,6 +229,31 @@ struct ResolvedScan {
     manifest_list_location: String,
     bound: Option<BoundPredicate>,
     stats_keep: Option<BTreeSet<i32>>,
+    /// The resolved governance enforcement for this `(principal, table)`
+    /// (D-F2.1): a row-filter expression to inject and the field ids of masked
+    /// columns to strip. Attached by the handler after RBAC + ABAC resolution;
+    /// [`ScanEnforcement::none`] when no policy applies (or the recompute path,
+    /// where the stored plan already reflects the caller — see below).
+    enforcement: ScanEnforcement,
+}
+
+/// The governance enforcement to fold into a plan's serialized tasks: the
+/// row-filter predicate and the masked-column field ids to strip. Resolved
+/// once per plan by [`crate::governance`] and carried on [`ResolvedScan`] so
+/// the sync, async, and recompute serialization paths all apply it uniformly.
+#[derive(Debug, Clone, Default)]
+struct ScanEnforcement {
+    /// Row-filter predicate to AND into every task residual, or `None`.
+    row_policy: Option<Expression>,
+    /// Field ids of masked columns to strip from returned data-file stats.
+    strip_fields: BTreeSet<i32>,
+}
+
+impl ScanEnforcement {
+    /// No enforcement (nothing to inject or strip).
+    fn none() -> Self {
+        Self::default()
+    }
 }
 
 /// Rejects request shapes the planner does not (yet) support.
@@ -278,6 +399,7 @@ fn resolve_scan(
         manifest_list_location,
         bound,
         stats_keep,
+        enforcement: ScanEnforcement::none(),
     }))
 }
 
@@ -289,9 +411,12 @@ fn pages_for(
     page_size: usize,
 ) -> Vec<plan_store::NewPlanPage> {
     let column_types = engine::schema_primitive_types(&scan.schema);
+    let strip = &scan.enforcement.strip_fields;
     let ctx = SerializeContext {
         column_types: &column_types,
         stats_keep: scan.stats_keep.as_ref(),
+        row_policy: scan.enforcement.row_policy.as_ref(),
+        strip_fields: (!strip.is_empty()).then_some(strip),
     };
     engine::build_pages(outcome, &ctx, page_size)
         .into_iter()
@@ -328,11 +453,16 @@ fn with_fields(payload: Value, extra: &[(&str, Value)]) -> Value {
 
 /// `POST /{prefix}/namespaces/{namespace}/tables/{table}/plan` —
 /// planTableScan.
+// A linear orchestration: RBAC → metadata → scan resolve → ABAC enforcement →
+// sync/async dispatch. Splitting it apart would scatter the request lifecycle
+// across helpers without making any single step clearer.
+#[allow(clippy::too_many_lines)]
 pub async fn plan_table_scan(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(runtime): Extension<Arc<PlanningRuntime>>,
     Path((prefix, raw_namespace, name)): Path<(String, String, String)>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Response, ApiError> {
     if !state.config.planning.enabled {
@@ -363,7 +493,7 @@ pub async fn plan_table_scan(
 
     let created_by = principal.audit_string();
 
-    let Some(scan) = resolve_scan(metadata, &request)? else {
+    let Some(mut scan) = resolve_scan(metadata, &request)? else {
         // Empty table: completed inline, zero tasks — still a real plan
         // row (plan-id is required in the response, and cancel must work).
         return respond_completed_inline(
@@ -380,6 +510,24 @@ pub async fn plan_table_scan(
         )
         .await;
     };
+
+    // Layer-1 enforcement (Pillar D, D-F2.1): resolve the (principal, table,
+    // purpose) ABAC decision now that RBAC READ has passed and the scan schema
+    // is known. A full deny aborts the plan (403, audited); otherwise the
+    // row-filter expression and masked-column field ids are attached to the
+    // scan so every serialized task carries them.
+    let chain = namespace_scope_chain(&state.pool, &warehouse.id, &levels).await?;
+    let purpose = purpose_from_headers(&headers);
+    apply_enforcement(
+        &state,
+        &principal,
+        &record,
+        &chain,
+        &scan.schema.clone(),
+        purpose.as_deref(),
+        &mut scan,
+    )
+    .await?;
 
     let io = ManifestIo {
         runtime: &runtime,
@@ -548,9 +696,21 @@ async fn respond_completed_inline(
 
 /// Recomputes an inline plan's payload for fetchPlanningResult: the
 /// stored request re-planned against the stored (pinned) snapshot.
+///
+/// Enforcement (D-F2.1) is re-resolved and re-applied here for the *fetching*
+/// principal — an inline plan stores no pages, so the filter/mask must be
+/// recomputed on every fetch (RBAC READ is likewise re-checked upstream, so a
+/// revoked grant or a policy that now fully denies is caught at fetch time,
+/// not just at plan time). Re-resolution does not re-audit on every poll (the
+/// decision was audited at plan creation); a *new* full deny does surface as a
+/// 403.
+#[allow(clippy::too_many_arguments)] // a plain fan-out of handler locals
 async fn recompute_inline_payload(
     state: &AppState,
     runtime: &PlanningRuntime,
+    principal: &Principal,
+    namespace_ids: &[String],
+    purpose: Option<&str>,
     warehouse: &WarehouseRecord,
     record: &TableRecord,
     plan: &plan_store::ScanPlanRecord,
@@ -581,11 +741,38 @@ async fn recompute_inline_payload(
                 format!("current metadata at {metadata_location:?} is unreadable: {e}"),
             )
         })?;
-    let scan = resolve_scan(metadata, &request)?.ok_or_else(|| {
+    let mut scan = resolve_scan(metadata, &request)?.ok_or_else(|| {
         // The pinned snapshot has been expired/removed from metadata since
         // the plan was created; the plan result is genuinely gone.
         no_such_plan(&plan.id)
     })?;
+
+    // Re-apply Layer-1 enforcement for the fetching principal.
+    let table_ctx = TableContext {
+        table_id: &record.id,
+        namespace_ids,
+        schema: &scan.schema.clone(),
+        owner: None,
+    };
+    let policy =
+        governance::resolve_scan_policy(&state.pool, principal, &table_ctx, purpose).await?;
+    if policy.denied {
+        return Err(forbidden(format!(
+            "access denied by policy: {}",
+            policy.reason
+        )));
+    }
+    let mut strip_fields = BTreeSet::new();
+    for col in &policy.removed_columns {
+        if let Some(id) = engine::resolve_field_name(&scan.schema, col, true) {
+            strip_fields.insert(id);
+        }
+    }
+    scan.enforcement = ScanEnforcement {
+        row_policy: policy.row_filter,
+        strip_fields,
+    };
+
     let io = ManifestIo {
         runtime,
         pool: &state.pool,
@@ -796,11 +983,12 @@ pub async fn fetch_planning_result(
     Extension(principal): Extension<Principal>,
     Extension(runtime): Extension<Arc<PlanningRuntime>>,
     Path((prefix, raw_namespace, name, plan_id)): Path<(String, String, String, String)>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Response, ApiError> {
     if !state.config.planning.enabled {
         return Err(unsupported("server-side scan planning is disabled"));
     }
-    let (warehouse, _levels, record) =
+    let (warehouse, levels, record) =
         authorize_read(&state, &principal, &prefix, &raw_namespace, &name).await?;
     let plan = plan_for_table(&state.pool, &record, &plan_id).await?;
 
@@ -815,8 +1003,19 @@ pub async fn fetch_planning_result(
         }
         plan_store::PlanStatus::Completed => match plan.result_mode {
             plan_store::ResultMode::Inline => {
-                let payload =
-                    recompute_inline_payload(&state, &runtime, &warehouse, &record, &plan).await?;
+                let chain = namespace_scope_chain(&state.pool, &warehouse.id, &levels).await?;
+                let purpose = purpose_from_headers(&headers);
+                let payload = recompute_inline_payload(
+                    &state,
+                    &runtime,
+                    &principal,
+                    &chain,
+                    purpose.as_deref(),
+                    &warehouse,
+                    &record,
+                    &plan,
+                )
+                .await?;
                 with_fields(payload, &[("status", json!("completed"))])
             }
             plan_store::ResultMode::Paged => {

@@ -6,14 +6,26 @@
 // token (for oidc-mode servers) is held in session memory only — see auth.ts.
 
 import type {
+  AssignTagRequest,
   AuditQueryParams,
   AuditQueryResponse,
+  BindPolicyRequest,
   ConfigResponse,
+  CreateGovPolicyRequest,
   CreateGrantRequest,
   CreateMirrorRequest,
+  CreateTagRequest,
   CreateWebhookRequest,
+  DriftResponse,
+  EffectivePolicyResponse,
   FeedResponse,
+  GovAssignment,
+  GovBinding,
+  GovPolicy,
+  GovTag,
   Grant,
+  ListGovPoliciesResponse,
+  ListTagsResponse,
   HealthHistoryResponse,
   HealthResponse,
   ListDeliveriesResponse,
@@ -332,6 +344,47 @@ export const api = {
     request<SprawlSummary>(
       `/api/v2/federation/sprawl${qs({ stale_threshold_s: staleThresholdS })}`,
     ),
+
+  // ---- governance (Pillar D) ------------------------------------------
+  govListTags: () => request<ListTagsResponse>("/api/v2/governance/tags"),
+  govCreateTag: (body: CreateTagRequest) =>
+    request<GovTag>("/api/v2/governance/tags", { method: "POST", body }),
+  govDeleteTag: (id: string) =>
+    request<void>(`/api/v2/governance/tags/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      expectNoContent: true,
+    }),
+  govAssignTag: (body: AssignTagRequest) =>
+    request<GovAssignment>("/api/v2/governance/tags/assignments", {
+      method: "POST",
+      body,
+    }),
+  govListPolicies: () =>
+    request<ListGovPoliciesResponse>("/api/v2/governance/policies"),
+  govCreatePolicy: (body: CreateGovPolicyRequest) =>
+    request<GovPolicy>("/api/v2/governance/policies", { method: "POST", body }),
+  govDeletePolicy: (id: string) =>
+    request<void>(`/api/v2/governance/policies/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      expectNoContent: true,
+    }),
+  govBindPolicy: (id: string, body: BindPolicyRequest) =>
+    request<GovBinding>(
+      `/api/v2/governance/policies/${encodeURIComponent(id)}/bindings`,
+      { method: "POST", body },
+    ),
+  govEffectivePolicy: (params: {
+    principal: string;
+    warehouse: string;
+    namespace: string;
+    table: string;
+    purpose?: string;
+  }) =>
+    request<EffectivePolicyResponse>(
+      `/api/v2/governance/effective-policy${qs(params)}`,
+    ),
+  govDrift: (warehouse: string) =>
+    request<DriftResponse>(`/api/v2/governance/drift${qs({ warehouse })}`),
 };
 
 export type Api = typeof api;

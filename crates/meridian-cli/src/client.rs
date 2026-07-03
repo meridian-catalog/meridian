@@ -522,6 +522,75 @@ pub(crate) async fn sprawl(
     Ok(check(response).await?.json().await?)
 }
 
+// ---------------------------------------------------------------------------
+// Governance (Pillar D): tags, policies, and the analytics reads. These use
+// generic verbs against `/api/v2/governance/...` — the surface is broad, so a
+// handful of generic helpers keeps the client small.
+// ---------------------------------------------------------------------------
+
+/// `GET {path}` under the server base, with optional query params.
+pub(crate) async fn gov_get(
+    server: &str,
+    token: Option<&str>,
+    path: &str,
+    query: &[(&str, String)],
+) -> Result<Value, CliError> {
+    let mut request = http_client()?.get(format!("{}{path}", base(server)));
+    if !query.is_empty() {
+        request = request.query(query);
+    }
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
+/// `POST {path}` with a JSON body.
+pub(crate) async fn gov_post(
+    server: &str,
+    token: Option<&str>,
+    path: &str,
+    body: &Value,
+) -> Result<Value, CliError> {
+    let request = http_client()?
+        .post(format!("{}{path}", base(server)))
+        .json(body);
+    let response = with_token(request, token).send().await?;
+    let checked = check(response).await?;
+    // Some governance mutations answer 204 No Content (delete). Tolerate an
+    // empty body by returning null rather than failing JSON parsing.
+    let text = checked.text().await?;
+    if text.trim().is_empty() {
+        Ok(Value::Null)
+    } else {
+        serde_json::from_str(&text).map_err(|e| CliError(format!("malformed JSON response: {e}")))
+    }
+}
+
+/// `PATCH {path}` with a JSON body.
+pub(crate) async fn gov_patch(
+    server: &str,
+    token: Option<&str>,
+    path: &str,
+    body: &Value,
+) -> Result<Value, CliError> {
+    let request = http_client()?
+        .patch(format!("{}{path}", base(server)))
+        .json(body);
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
+/// `DELETE {path}` (ignores the empty body).
+pub(crate) async fn gov_delete(
+    server: &str,
+    token: Option<&str>,
+    path: &str,
+) -> Result<(), CliError> {
+    let request = http_client()?.delete(format!("{}{path}", base(server)));
+    let response = with_token(request, token).send().await?;
+    check(response).await?;
+    Ok(())
+}
+
 /// Renders rows as a plain aligned text table.
 #[must_use]
 pub(crate) fn render_table(headers: &[&str], rows: &[Vec<String>]) -> String {

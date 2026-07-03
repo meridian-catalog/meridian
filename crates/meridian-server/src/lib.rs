@@ -24,6 +24,7 @@ use ulid::Ulid;
 mod auth;
 pub mod error;
 pub mod events;
+pub mod governance;
 pub mod maintenance;
 pub mod planning;
 pub mod routes;
@@ -298,6 +299,79 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v2/federation/sprawl",
             get(routes::federation::get_sprawl),
+        )
+        // Cross-engine access governance (Pillar D): tags + assignments +
+        // coverage (D-F3), versioned policies + bindings + dry-run (D-F1), the
+        // effective-policy / who-can-see-what / drift / evidence analytics
+        // (D-F5). Every route is management-gated (see routes::governance).
+        // The enforcement these configure is applied in the scan-plan path
+        // (crate::governance + routes::planning, D-F2.1).
+        .route(
+            "/api/v2/governance/tags",
+            get(routes::governance::list_tags).post(routes::governance::create_tag),
+        )
+        .route(
+            "/api/v2/governance/tags/{id}",
+            delete(routes::governance::delete_tag),
+        )
+        .route(
+            "/api/v2/governance/tags/coverage",
+            get(routes::governance::classification_coverage),
+        )
+        .route(
+            "/api/v2/governance/tags/assignments",
+            post(routes::governance::assign_tag),
+        )
+        .route(
+            "/api/v2/governance/tags/assignments/{id}",
+            delete(routes::governance::unassign_tag),
+        )
+        .route(
+            "/api/v2/governance/tags/assignments/{id}/approve",
+            post(routes::governance::approve_assignment),
+        )
+        .route(
+            "/api/v2/governance/policies",
+            get(routes::governance::list_policies).post(routes::governance::create_policy),
+        )
+        .route(
+            "/api/v2/governance/policies/dry-run",
+            post(routes::governance::dry_run_policy),
+        )
+        .route(
+            "/api/v2/governance/policies/bindings/{binding_id}",
+            delete(routes::governance::unbind_policy),
+        )
+        .route(
+            "/api/v2/governance/policies/{id}",
+            get(routes::governance::get_policy)
+                .patch(routes::governance::update_policy)
+                .delete(routes::governance::delete_policy),
+        )
+        .route(
+            "/api/v2/governance/policies/{id}/versions",
+            get(routes::governance::list_policy_versions),
+        )
+        .route(
+            "/api/v2/governance/policies/{id}/rollback",
+            post(routes::governance::rollback_policy),
+        )
+        .route(
+            "/api/v2/governance/policies/{id}/bindings",
+            get(routes::governance::list_bindings).post(routes::governance::bind_policy),
+        )
+        .route(
+            "/api/v2/governance/effective-policy",
+            get(routes::governance::effective_policy),
+        )
+        .route(
+            "/api/v2/governance/who-can-see",
+            get(routes::governance::who_can_see),
+        )
+        .route("/api/v2/governance/drift", get(routes::governance::drift))
+        .route(
+            "/api/v2/governance/evidence",
+            get(routes::governance::evidence),
         )
         // Unmatched routes and wrong methods must still speak the IRC error
         // envelope — engines parse error bodies, not just status codes.

@@ -105,7 +105,7 @@ answer 406 and are not advertised in `GET /v1/config`).
 
 | Operation | Endpoint | Status | Notes |
 |---|---|---|---|
-| `planTableScan` | `POST .../tables/{table}/plan` | Partial | Point-in-time scans: `snapshot-id` (default: current), `filter` (full expression pushdown: manifest summaries → partition tuples → column stats), `case-sensitive`, `use-snapshot-schema`, `stats-fields` (trims returned column stats), `select` (validated; does not change the payload yet — the column-mask hook). Tasks carry `delete-file-references` (position/equality deletes attached by the spec's sequence-number and partition scope rules, deletion vectors supersede position delete files) and a per-file `residual-filter` (exact partition folding; the row-policy injection point). Verified against the conformance suite's real Spark merge-on-read table. **Missing:** incremental scans (`start-snapshot-id`/`end-snapshot-id`) → 406; `min-rows-requested` accepted and ignored; no `storage-credentials` in planning responses (use loadTable delegation); `Idempotency-Key` accepted but not deduplicated. |
+| `planTableScan` | `POST .../tables/{table}/plan` | Partial | Point-in-time scans: `snapshot-id` (default: current), `filter` (full expression pushdown: manifest summaries → partition tuples → column stats), `case-sensitive`, `use-snapshot-schema`, `stats-fields` (trims returned column stats), `select` (validated). Tasks carry `delete-file-references` (position/equality deletes attached by the spec's sequence-number and partition scope rules, deletion vectors supersede position delete files) and a per-file `residual-filter` (exact partition folding). **Governance enforcement (Pillar D, D-F2.1) is applied here**: after RBAC `READ`, the `(principal, table, purpose)` ABAC decision is resolved — a full deny returns 403, a row-filter policy is AND-ed into every task's `residual-filter`, and a masked column's statistics are stripped from every returned data file (the column is absent from the plan). Purpose is declared with the `X-Meridian-Purpose` header. Every enforced plan writes a `governance.scan.enforced` audit row. See the honest per-engine guarantees in [docs/design/enforcement-matrix.md](design/enforcement-matrix.md). General planning (delete-file attachment, residual folding) is verified against the conformance suite's real Spark merge-on-read table; the governance enforcement described here is verified by a PyIceberg/MinIO enforcement e2e (`conformance/e2e/tests/test_governance_enforcement.py`) and the `meridian-server` governance integration tests — no engine matrix exercises governance enforcement yet. **Missing:** incremental scans (`start-snapshot-id`/`end-snapshot-id`) → 406; `min-rows-requested` accepted and ignored; no `storage-credentials` in planning responses (use loadTable delegation); `Idempotency-Key` accepted but not deduplicated. |
 | `fetchPlanningResult` | `GET .../tables/{table}/plan/{plan-id}` | Implemented | `submitted`/`cancelled`/`failed`/`completed` per the spec's discriminated result. Completed synchronous plans re-plan from the stored request pinned to the plan's snapshot (deterministic on immutable metadata); completed asynchronous plans return `plan-tasks` page tokens. |
 | `cancelPlanning` | `DELETE .../tables/{table}/plan/{plan-id}` | Implemented | 204; drops persisted result pages, flips `submitted`/`completed` plans to `cancelled` (a racing worker's result is discarded), idempotent on terminal states. |
 | `fetchScanTasks` | `POST .../tables/{table}/tasks` | Implemented | One persisted page per `plan-task` token (single primary-key read); repeatable; unknown or expired tokens → 404 `NoSuchPlanTaskException`. Page-local `delete-file-references` indices; each page carries exactly the delete files its tasks reference. |
@@ -637,3 +637,61 @@ CLI: `meridian mirror create|list|sync`, `meridian sprawl`.
 - **Console**: the **Federation** page lists mirrors with their sync status,
   a create-mirror form, and the sprawl dashboard (per-source counts,
   duplicates, stale mirrors, ownership, native health).
+
+### Governance: tags, policies, enforcement (`/api/v2/governance/...`)
+
+Cross-engine access governance (Pillar D). The control plane for the
+enforcement the scan planner applies (see the `planTableScan` row above and
+[docs/design/enforcement-matrix.md](design/enforcement-matrix.md) for the
+honest per-engine guarantees). Every endpoint requires **management** access
+(admin role or any `MANAGE_WAREHOUSE` grant) in `oidc` mode — governance is a
+cross-resource surface (a policy can bind to a tag spanning the whole catalog),
+the same bar as warehouse CRUD.
+
+- **Tags** (`GET`/`POST /api/v2/governance/tags`, `DELETE .../tags/{id}`): the
+  classification unit (`key:value`, e.g. `pii:email`). Assignments:
+  `POST /api/v2/governance/tags/assignments` places a tag on a table,
+  namespace, or a single **column** (`securable_type: column`);
+  `POST .../assignments/{id}/approve` puts a classifier suggestion in force;
+  `DELETE .../assignments/{id}` removes one. Classification coverage:
+  `GET /api/v2/governance/tags/coverage?warehouse=[&namespace=]` reports, per
+  table, whether it carries a tag and how many columns are tagged, with a
+  warehouse roll-up (D-F3).
+- **Policies** (`GET`/`POST /api/v2/governance/policies`,
+  `GET`/`PATCH`/`DELETE .../policies/{id}`): versioned governance objects of
+  one `kind` — `row_filter`, `column_mask`, or `abac`. The `definition` is a
+  typed `AbacRule` (see `docs/adr/009-cedar-abac.md`); it is validated against
+  the Meridian Cedar schema on write, so a malformed rule is a 400, not a
+  silent no-op (D-F1). Version history: `GET .../policies/{id}/versions`;
+  rollback: `POST .../policies/{id}/rollback {to_version}` (creates a new
+  version with the old definition — history stays append-only). Bindings:
+  `GET`/`POST .../policies/{id}/bindings` attach a policy to a **tag** (applies
+  wherever the tag is assigned) or a securable (table/namespace);
+  `DELETE .../policies/bindings/{binding_id}` unbinds.
+- **Dry-run** (`POST /api/v2/governance/policies/dry-run`): preview a
+  *proposed* policy's effect (`denied` / `row_filtered` / `masked_columns`) on
+  a set of principals against one table, without persisting anything — the
+  "who would lose access" answer (D-F1, D-F5). Pure: nothing is written.
+- **Effective policy** (`GET /api/v2/governance/effective-policy?principal=&warehouse=&namespace=&table=[&purpose=]`):
+  the full ABAC decision for a `(principal, table)` — applied policies, the
+  resolved row filter, masked columns, and the allow/deny decision with its
+  reason. The auditor's "what does this person actually see" answer.
+- **Who-can-see-what** (`GET /api/v2/governance/who-can-see?principal=`): a
+  principal's effective RBAC permissions (the reach), to be read alongside
+  `effective-policy` per table for the ABAC overlay (D-F5).
+- **Drift** (`GET /api/v2/governance/drift?warehouse=`): policy-drift alerts —
+  today, a column carrying a `pii*` tag with no column-mask policy bound to
+  that tag (a classified-but-unmasked column an auditor would flag) (D-F5).
+- **Evidence** (`GET /api/v2/governance/evidence[?limit=]`): an audit-ready
+  pack — the current policy + tag inventory plus the hash-chained
+  governance-decision audit trail (every `governance.*` action).
+- **Audit**: every governance mutation writes its audit row and outbox event
+  on the same transaction as the state change; every enforced scan plan writes
+  a `governance.scan.enforced` row. Governance decisions are part of the
+  hash-chained audit trail — the audit trail is the product (D-F2).
+- **CLI**: `meridian tag` (create/list/rm/assign), `meridian policy`
+  (create/list/rm/set-enabled/bind/dry-run), `meridian govern`
+  (effective/who-can-see/coverage/drift/evidence).
+- **Console**: the **Policies** page — classification tags (list + create),
+  policies (list + a kind-aware create form + bind-to-tag), an effective-policy
+  lookup, and a drift scan.

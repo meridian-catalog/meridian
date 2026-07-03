@@ -107,6 +107,19 @@ enum Command {
     #[command(subcommand)]
     Mirror(MirrorCommand),
 
+    /// Manage governance tags and their assignments (Pillar D).
+    #[command(subcommand)]
+    Tag(TagCommand),
+
+    /// Manage governance policies — row filters, column masks, ABAC (Pillar D).
+    #[command(subcommand)]
+    Policy(PolicyCommand),
+
+    /// Governance analytics: effective policy, who-can-see, coverage, drift,
+    /// evidence (Pillar D).
+    #[command(subcommand)]
+    Govern(GovernCommand),
+
     /// Show the cross-catalog sprawl summary (Pillar B).
     ///
     /// Rolls up across every catalog Meridian knows (its warehouses and
@@ -532,6 +545,234 @@ enum MirrorCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum TagCommand {
+    /// Create a classification tag (`key:value`, e.g. pii:email).
+    Create {
+        /// Tag key, e.g. pii.
+        #[arg(long)]
+        key: String,
+        /// Tag value, e.g. email.
+        #[arg(long)]
+        value: String,
+        /// Optional description.
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// List all tags.
+    List {
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// Delete a tag by id.
+    Rm {
+        /// Tag id.
+        #[arg(value_name = "TAG_ID")]
+        id: String,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// Assign a tag to a table, namespace, or column.
+    Assign {
+        /// Tag id to assign.
+        #[arg(long)]
+        tag: String,
+        /// Securable kind: table | namespace | column.
+        #[arg(long = "type", value_name = "KIND")]
+        securable_type: String,
+        /// Warehouse the securable lives in.
+        #[arg(long)]
+        warehouse: String,
+        /// Dotted namespace.
+        #[arg(long)]
+        namespace: String,
+        /// Table name (for table/column targets).
+        #[arg(long)]
+        table: Option<String>,
+        /// Column name (for a column target).
+        #[arg(long)]
+        column: Option<String>,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PolicyCommand {
+    /// Create a policy. `--definition` is the JSON `AbacRule` (see docs).
+    Create {
+        /// Policy name (unique per workspace).
+        #[arg(long)]
+        name: String,
+        /// Kind: `row_filter` | `column_mask` | `abac`.
+        #[arg(long)]
+        kind: String,
+        /// The rule definition as JSON (an `AbacRule`).
+        #[arg(long, value_name = "JSON")]
+        definition: String,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// List all policies.
+    List {
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// Enable or disable a policy (bumps its version).
+    SetEnabled {
+        /// Policy id.
+        #[arg(value_name = "POLICY_ID")]
+        id: String,
+        /// Whether the policy is in force.
+        #[arg(long, action = clap::ArgAction::Set)]
+        enabled: bool,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// Delete a policy by id.
+    Rm {
+        /// Policy id.
+        #[arg(value_name = "POLICY_ID")]
+        id: String,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// Bind a policy to a tag, table, or namespace.
+    Bind {
+        /// Policy id.
+        #[arg(value_name = "POLICY_ID")]
+        id: String,
+        /// Target kind: tag | table | namespace.
+        #[arg(long = "type", value_name = "KIND")]
+        target_type: String,
+        /// Tag id (for a tag binding).
+        #[arg(long)]
+        tag: Option<String>,
+        /// Warehouse (for table/namespace bindings).
+        #[arg(long)]
+        warehouse: Option<String>,
+        /// Dotted namespace (for table/namespace bindings).
+        #[arg(long)]
+        namespace: Option<String>,
+        /// Table name (for a table binding).
+        #[arg(long)]
+        table: Option<String>,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// Dry-run a proposed policy against principals on one table.
+    DryRun {
+        /// Kind: `row_filter` | `column_mask` | `abac`.
+        #[arg(long)]
+        kind: String,
+        /// The proposed rule definition as JSON.
+        #[arg(long, value_name = "JSON")]
+        definition: String,
+        /// Comma-separated principal audit strings (e.g. user:alice).
+        #[arg(long, value_name = "PRINCIPALS")]
+        principals: String,
+        #[arg(long)]
+        warehouse: String,
+        #[arg(long)]
+        namespace: String,
+        #[arg(long)]
+        table: String,
+        /// Declared purpose to evaluate with.
+        #[arg(long)]
+        purpose: Option<String>,
+        /// A tag to assume the table carries (preview a not-yet-bound tag).
+        #[arg(long)]
+        assume_tag: Option<String>,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum GovernCommand {
+    /// The effective policy for a (principal, table): masks, filter, decision.
+    Effective {
+        /// Principal audit string, e.g. user:alice@example.com.
+        #[arg(long)]
+        principal: String,
+        #[arg(long)]
+        warehouse: String,
+        #[arg(long)]
+        namespace: String,
+        #[arg(long)]
+        table: String,
+        /// Declared purpose.
+        #[arg(long)]
+        purpose: Option<String>,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// A principal's effective permissions (who-can-see-what).
+    WhoCanSee {
+        /// Principal audit string.
+        #[arg(long)]
+        principal: String,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// Classification coverage for a warehouse (optionally a namespace).
+    Coverage {
+        #[arg(long)]
+        warehouse: String,
+        #[arg(long)]
+        namespace: Option<String>,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// Policy-drift alerts for a warehouse (classified-but-unmasked columns).
+    Drift {
+        #[arg(long)]
+        warehouse: String,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// Audit-ready evidence pack (policy/tag inventory + decision trail).
+    Evidence {
+        /// Max audit rows to include.
+        #[arg(long)]
+        limit: Option<i64>,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum NamespaceCommand {
     /// Create a namespace (multi-level as dot-separated, e.g. accounting.tax).
     Create {
@@ -591,6 +832,9 @@ fn main() -> ExitCode {
         Command::Events(command) => run_async(run_events(command)),
         Command::Maintenance(command) => run_async(run_maintenance(command)),
         Command::Mirror(command) => run_async(run_mirror(command)),
+        Command::Tag(command) => run_async(run_tag(command)),
+        Command::Policy(command) => run_async(run_policy(command)),
+        Command::Govern(command) => run_async(run_govern(command)),
         Command::Sprawl {
             stale_threshold_s,
             server,
@@ -1601,6 +1845,473 @@ fn field_str(v: &Value, key: &str) -> String {
 /// Reads an integer field, defaulting to 0.
 fn field_i64(v: &Value, key: &str) -> i64 {
     v.get(key).and_then(Value::as_i64).unwrap_or(0)
+}
+
+/// Parses a `--definition` JSON argument into a value, with a clear error.
+fn parse_definition(raw: &str) -> Result<Value, CliError> {
+    serde_json::from_str(raw).map_err(|e| CliError(format!("--definition is not valid JSON: {e}")))
+}
+
+async fn run_tag(command: TagCommand) -> Result<(), CliError> {
+    match command {
+        TagCommand::Create {
+            key,
+            value,
+            description,
+            server,
+            token,
+        } => {
+            let body =
+                serde_json::json!({ "key": key, "value": value, "description": description });
+            let created =
+                client::gov_post(&server, token.as_deref(), "/api/v2/governance/tags", &body)
+                    .await?;
+            println!(
+                "created tag {} ({})",
+                created.get("id").and_then(Value::as_str).unwrap_or("?"),
+                created
+                    .get("rendered")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?"),
+            );
+            Ok(())
+        }
+        TagCommand::List { server, token } => {
+            let body =
+                client::gov_get(&server, token.as_deref(), "/api/v2/governance/tags", &[]).await?;
+            let tags = body
+                .get("tags")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let rows: Vec<Vec<String>> = tags
+                .iter()
+                .map(|t| {
+                    vec![
+                        field_str(t, "id"),
+                        field_str(t, "rendered"),
+                        field_str(t, "description"),
+                    ]
+                })
+                .collect();
+            print!(
+                "{}",
+                client::render_table(&["ID", "TAG", "DESCRIPTION"], &rows)
+            );
+            Ok(())
+        }
+        TagCommand::Rm { id, server, token } => {
+            client::gov_delete(
+                &server,
+                token.as_deref(),
+                &format!("/api/v2/governance/tags/{id}"),
+            )
+            .await?;
+            println!("deleted tag {id}");
+            Ok(())
+        }
+        TagCommand::Assign {
+            tag,
+            securable_type,
+            warehouse,
+            namespace,
+            table,
+            column,
+            server,
+            token,
+        } => {
+            let body = serde_json::json!({
+                "tag_id": tag,
+                "target": {
+                    "securable_type": securable_type,
+                    "warehouse": warehouse,
+                    "namespace": namespace,
+                    "table": table,
+                    "column": column,
+                }
+            });
+            let created = client::gov_post(
+                &server,
+                token.as_deref(),
+                "/api/v2/governance/tags/assignments",
+                &body,
+            )
+            .await?;
+            println!(
+                "assigned tag (assignment {})",
+                created.get("id").and_then(Value::as_str).unwrap_or("?")
+            );
+            Ok(())
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)] // one match arm per policy subcommand
+async fn run_policy(command: PolicyCommand) -> Result<(), CliError> {
+    match command {
+        PolicyCommand::Create {
+            name,
+            kind,
+            definition,
+            server,
+            token,
+        } => {
+            let body = serde_json::json!({
+                "name": name, "kind": kind, "definition": parse_definition(&definition)?
+            });
+            let created = client::gov_post(
+                &server,
+                token.as_deref(),
+                "/api/v2/governance/policies",
+                &body,
+            )
+            .await?;
+            println!(
+                "created policy {} (v{})",
+                created.get("id").and_then(Value::as_str).unwrap_or("?"),
+                created.get("version").and_then(Value::as_i64).unwrap_or(0),
+            );
+            Ok(())
+        }
+        PolicyCommand::List { server, token } => {
+            let body = client::gov_get(
+                &server,
+                token.as_deref(),
+                "/api/v2/governance/policies",
+                &[],
+            )
+            .await?;
+            let policies = body
+                .get("policies")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let rows: Vec<Vec<String>> = policies
+                .iter()
+                .map(|p| {
+                    vec![
+                        field_str(p, "id"),
+                        field_str(p, "name"),
+                        field_str(p, "kind"),
+                        field_i64(p, "version").to_string(),
+                        p.get("enabled")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                            .to_string(),
+                    ]
+                })
+                .collect();
+            print!(
+                "{}",
+                client::render_table(&["ID", "NAME", "KIND", "VER", "ENABLED"], &rows)
+            );
+            Ok(())
+        }
+        PolicyCommand::SetEnabled {
+            id,
+            enabled,
+            server,
+            token,
+        } => {
+            let body = serde_json::json!({ "enabled": enabled });
+            let updated = client::gov_patch(
+                &server,
+                token.as_deref(),
+                &format!("/api/v2/governance/policies/{id}"),
+                &body,
+            )
+            .await?;
+            println!(
+                "policy {id} enabled={} (v{})",
+                enabled,
+                updated.get("version").and_then(Value::as_i64).unwrap_or(0),
+            );
+            Ok(())
+        }
+        PolicyCommand::Rm { id, server, token } => {
+            client::gov_delete(
+                &server,
+                token.as_deref(),
+                &format!("/api/v2/governance/policies/{id}"),
+            )
+            .await?;
+            println!("deleted policy {id}");
+            Ok(())
+        }
+        PolicyCommand::Bind {
+            id,
+            target_type,
+            tag,
+            warehouse,
+            namespace,
+            table,
+            server,
+            token,
+        } => {
+            let body = serde_json::json!({
+                "target_type": target_type,
+                "tag_id": tag,
+                "warehouse": warehouse,
+                "namespace": namespace,
+                "table": table,
+            });
+            let created = client::gov_post(
+                &server,
+                token.as_deref(),
+                &format!("/api/v2/governance/policies/{id}/bindings"),
+                &body,
+            )
+            .await?;
+            println!(
+                "bound policy {id} (binding {})",
+                created.get("id").and_then(Value::as_str).unwrap_or("?")
+            );
+            Ok(())
+        }
+        PolicyCommand::DryRun {
+            kind,
+            definition,
+            principals,
+            warehouse,
+            namespace,
+            table,
+            purpose,
+            assume_tag,
+            server,
+            token,
+        } => {
+            let principal_list: Vec<String> = principals
+                .split(',')
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let body = serde_json::json!({
+                "kind": kind,
+                "definition": parse_definition(&definition)?,
+                "principals": principal_list,
+                "warehouse": warehouse,
+                "namespace": namespace,
+                "table": table,
+                "purpose": purpose,
+                "assume_table_tag": assume_tag,
+            });
+            let result = client::gov_post(
+                &server,
+                token.as_deref(),
+                "/api/v2/governance/policies/dry-run",
+                &body,
+            )
+            .await?;
+            let results = result
+                .get("results")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let rows: Vec<Vec<String>> = results
+                .iter()
+                .map(|r| {
+                    let masked = r
+                        .get("masked_columns")
+                        .and_then(Value::as_array)
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        })
+                        .unwrap_or_default();
+                    vec![
+                        field_str(r, "principal"),
+                        r.get("denied")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                            .to_string(),
+                        r.get("row_filtered")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                            .to_string(),
+                        masked,
+                    ]
+                })
+                .collect();
+            print!(
+                "{}",
+                client::render_table(&["PRINCIPAL", "DENIED", "ROW_FILTERED", "MASKED"], &rows)
+            );
+            Ok(())
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)] // one match arm per govern subcommand
+async fn run_govern(command: GovernCommand) -> Result<(), CliError> {
+    match command {
+        GovernCommand::Effective {
+            principal,
+            warehouse,
+            namespace,
+            table,
+            purpose,
+            server,
+            token,
+        } => {
+            let mut query = vec![
+                ("principal", principal),
+                ("warehouse", warehouse),
+                ("namespace", namespace),
+                ("table", table),
+            ];
+            if let Some(p) = purpose {
+                query.push(("purpose", p));
+            }
+            let body = client::gov_get(
+                &server,
+                token.as_deref(),
+                "/api/v2/governance/effective-policy",
+                &query,
+            )
+            .await?;
+            let masked = body
+                .get("masked_columns")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            println!(
+                "denied={}  masked=[{}]  row_filter={}\nreason: {}",
+                body.get("denied").and_then(Value::as_bool).unwrap_or(false),
+                masked,
+                body.get("row_filter")
+                    .map_or("none".to_owned(), std::string::ToString::to_string),
+                field_str(&body, "reason"),
+            );
+            Ok(())
+        }
+        GovernCommand::WhoCanSee {
+            principal,
+            server,
+            token,
+        } => {
+            let body = client::gov_get(
+                &server,
+                token.as_deref(),
+                "/api/v2/governance/who-can-see",
+                &[("principal", principal)],
+            )
+            .await?;
+            let perms = body
+                .get("permissions")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let rows: Vec<Vec<String>> = perms
+                .iter()
+                .map(|p| {
+                    vec![
+                        field_str(p, "privilege"),
+                        field_str(p, "securable_type"),
+                        field_str(p, "securable_id"),
+                        field_str(p, "via_role"),
+                    ]
+                })
+                .collect();
+            print!(
+                "{}",
+                client::render_table(
+                    &["PRIVILEGE", "SECURABLE", "SECURABLE ID", "VIA ROLE"],
+                    &rows
+                )
+            );
+            Ok(())
+        }
+        GovernCommand::Coverage {
+            warehouse,
+            namespace,
+            server,
+            token,
+        } => {
+            let mut query = vec![("warehouse", warehouse)];
+            if let Some(ns) = namespace {
+                query.push(("namespace", ns));
+            }
+            let body = client::gov_get(
+                &server,
+                token.as_deref(),
+                "/api/v2/governance/tags/coverage",
+                &query,
+            )
+            .await?;
+            println!(
+                "tables: {}   with any tag: {}",
+                field_i64(&body, "total_tables"),
+                field_i64(&body, "tables_with_any_tag"),
+            );
+            Ok(())
+        }
+        GovernCommand::Drift {
+            warehouse,
+            server,
+            token,
+        } => {
+            let body = client::gov_get(
+                &server,
+                token.as_deref(),
+                "/api/v2/governance/drift",
+                &[("warehouse", warehouse)],
+            )
+            .await?;
+            let alerts = body
+                .get("alerts")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            println!("drift alerts: {}", alerts.len());
+            let rows: Vec<Vec<String>> = alerts
+                .iter()
+                .map(|a| {
+                    vec![
+                        field_str(a, "table_id"),
+                        field_str(a, "column"),
+                        field_str(a, "tag"),
+                    ]
+                })
+                .collect();
+            print!(
+                "{}",
+                client::render_table(&["TABLE ID", "COLUMN", "TAG"], &rows)
+            );
+            Ok(())
+        }
+        GovernCommand::Evidence {
+            limit,
+            server,
+            token,
+        } => {
+            let query: Vec<(&str, String)> = limit
+                .map(|l| vec![("limit", l.to_string())])
+                .unwrap_or_default();
+            let body = client::gov_get(
+                &server,
+                token.as_deref(),
+                "/api/v2/governance/evidence",
+                &query,
+            )
+            .await?;
+            println!(
+                "evidence pack: {} policies, {} tags, {} decision(s) in the trail",
+                field_i64(&body, "policy_count"),
+                field_i64(&body, "tag_count"),
+                body.get("audit_trail")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len),
+            );
+            Ok(())
+        }
+    }
 }
 
 fn run_serve(all_in_one: bool, config_path: Option<&std::path::Path>) -> Result<(), MeridianError> {

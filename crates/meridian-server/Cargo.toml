@@ -15,6 +15,7 @@ hmac = { workspace = true }
 sha2 = { workspace = true }
 http = { workspace = true }
 jsonwebtoken = { workspace = true }
+meridian-authz = { workspace = true }
 meridian-common = { workspace = true }
 meridian-executor = { workspace = true }
 meridian-federation = { workspace = true }

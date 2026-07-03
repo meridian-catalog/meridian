@@ -10,6 +10,7 @@
 pub mod audit;
 pub mod events;
 pub mod federation;
+pub mod governance;
 pub mod grants;
 pub mod health;
 pub mod iceberg;

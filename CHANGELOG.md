@@ -12,6 +12,59 @@ releases begin, the project will adhere to
 
 ### Added
 
+- **Cross-engine access governance — scan-plan enforcement + the governance
+  API** (Pillar D, D-F2.1 / D-F1 / D-F3 / D-F5;
+  [enforcement matrix](docs/design/enforcement-matrix.md)). The enforcement
+  layer that turns the `meridian-authz` decision library into what an engine
+  actually sees. **Layer 1 (scan-plan enforcement), the headline:** in the
+  server-side scan-planning path, after RBAC `READ` passes, Meridian resolves
+  the `(principal, table, purpose)` ABAC decision and applies it *inside the
+  plan the engine executes* — a full deny returns 403 before any file is
+  offered, a row-filter policy's predicate is AND-ed into every returned scan
+  task's `residual-filter` (after partition folding, so pruning cannot drop
+  it), and a masked column's statistics are stripped from every returned data
+  file (the column is **absent** from the plan, not nulled — what the agent
+  gateway needs). Purpose is declared with the `X-Meridian-Purpose` header.
+  Every enforced plan writes a `governance.scan.enforced` audit row (principal,
+  table, applied policies, removed columns, reason) — the decision is part of
+  the hash-chained audit trail. Proven end-to-end with a **PyIceberg + MinIO**
+  client: a server-planning scan of a real table returns the masked column
+  absent and the rows filtered. New store modules `meridian_store::{policy,
+  tags}` (versioned policies with append-only history + rollback, tag CRUD +
+  column-level assignments, and the resolvers that map rows onto the authz
+  inputs), a `meridian_server::governance` decision bridge, and the
+  **`/api/v2/governance/...` API**: tags CRUD + assignment + coverage,
+  versioned policies + bindings + **dry-run** ("who would lose access"),
+  **effective-policy** for a `(principal, table)`, who-can-see-what,
+  **policy-drift** alerts, and an **audit-ready evidence** export. CLI
+  (`meridian tag` / `policy` / `govern`) and a console **Policies** page
+  (tags, kind-aware policy forms, effective-policy lookup, drift). The
+  enforcement matrix documents each engine/path's prevent-vs-detect guarantee
+  **honestly**: Layer 1 prevents for planning clients today; compiled secure
+  views (Layer 2) and native bridges (Layer 3) are designed, not yet
+  implemented; the vended-credential storage floor (Layer 4) is the universal
+  coarse bound. Management-gated (admin or `MANAGE_WAREHOUSE`); migration 0016.
+- **ABAC policy engine — Cedar decisions + row-filter/column-mask resolution**
+  (Pillar D, D-F1; new crate `meridian-authz`;
+  [ADR 009](docs/adr/009-cedar-abac.md)). A pure, database-free decision
+  library wrapping AWS's [Cedar](https://crates.io/crates/cedar-policy) engine.
+  It fixes a catalog policy model — principals (human/service/agent, with
+  groups, roles, purpose, environment), resources (namespace/table/view/column,
+  with tags, owner, classification), actions (read/write/commit/…), and a
+  request context (time, purpose, session) — and evaluates
+  `authorize(principal, action, resource, context)` to a decision that carries
+  its **determining policies and a human-readable reason for the audit trail**.
+  Deny overrides allow. A **tag → policy** convenience layer compiles the common
+  rule shapes ("`pii:high` denies read unless a purpose is granted", owner-allow,
+  group-based, time-bound, tag→row-filter, tag→column-mask) to Cedar, and
+  `resolve_filters_and_masks` returns the row filters and column masks that apply
+  to a `(principal, table)` — a **`RowFilter` compiles to the exact IRC
+  `Expression`** the server-side scan planner folds into each scan task's
+  residual, so policy and enforcement cannot drift. Policies are validated
+  against a Cedar schema (errors caught before save) and support dry-run. This
+  is the decision/resolution layer only; cross-engine *enforcement* (the D-F2
+  matrix) is a later wave, and the ADR documents each path's prevent-vs-detect
+  guarantee honestly.
 - **Inbound catalog mirrors — the sync engine** (Pillar B, B-F1; new crate
   `meridian-federation`; [ADR 008](docs/adr/008-federation-inbound-mirrors.md)).
   A *mirror* is an external Iceberg REST Catalog (Polaris, Lakekeeper, Unity's

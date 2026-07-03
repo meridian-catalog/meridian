@@ -642,12 +642,26 @@ pub fn residual_expression(
 /// Row-filter policies become an `and` of the pruning residual and the
 /// caller's policy expression, applied here — after residual folding,
 /// before serialization — so policy predicates are never folded away by
-/// partition pruning and every returned task carries them. Column masks
-/// will hook the (currently informational) `select` handling in the
-/// route. Until policy evaluation lands this is the identity.
+/// partition pruning and every returned task carries them. The policy
+/// expression is resolved once per plan by `crate::governance` (from the
+/// principal, the table's tags, and the applicable ABAC rules) and threaded
+/// in via [`SerializeContext::row_policy`]. When no row-filter policy applies
+/// this is the identity; column masking is handled by column removal in
+/// [`build_pages`] (see [`SerializeContext::strip_fields`]).
 #[must_use]
-pub fn apply_row_policy_seam(residual: Option<Expression>) -> Option<Expression> {
-    residual
+pub fn apply_row_policy_seam(
+    residual: Option<Expression>,
+    policy: Option<&Expression>,
+) -> Option<Expression> {
+    match (residual, policy) {
+        (Some(r), Some(p)) => Some(Expression::And {
+            left: Box::new(r),
+            right: Box::new(p.clone()),
+        }),
+        (Some(r), None) => Some(r),
+        (None, Some(p)) => Some(p.clone()),
+        (None, None) => None,
+    }
 }
 
 fn fold(pred: &BoundPredicate, tuple: &PartitionTuple, types: &[PartitionFieldType]) -> Folded {
@@ -853,6 +867,30 @@ pub fn schema_primitive_types(schema: &Schema) -> BTreeMap<i32, PrimitiveType> {
     out
 }
 
+/// Collects every field id that appears in a data file's statistics maps
+/// (column sizes, value/null/NaN counts, lower/upper bounds). Used to compute
+/// the "keep everything except the masked columns" set when governance strips
+/// columns and the request placed no `stats-fields` restriction.
+fn collect_stat_field_ids(file: &DataFile, out: &mut BTreeSet<i32>) {
+    for map in [
+        file.column_sizes.as_ref(),
+        file.value_counts.as_ref(),
+        file.null_value_counts.as_ref(),
+        file.nan_value_counts.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        out.extend(map.keys().copied());
+    }
+    for map in [file.lower_bounds.as_ref(), file.upper_bounds.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        out.extend(map.keys().copied());
+    }
+}
+
 /// Resolves a REST `FieldName` (dotted path; `element`/`key`/`value` for
 /// lists and maps) to a field id. Unlike filter binding, any terminal
 /// type is acceptable — selecting a struct column is legal.
@@ -906,6 +944,17 @@ pub struct SerializeContext<'a> {
     pub column_types: &'a BTreeMap<i32, PrimitiveType>,
     /// Stats restriction from `stats-fields`; `None` sends everything.
     pub stats_keep: Option<&'a BTreeSet<i32>>,
+    /// Governance row-filter predicate (D-F2.1) to AND into every task's
+    /// residual, resolved once per plan by `crate::governance`. `None` when
+    /// no row-filter policy applies to this `(principal, table)`.
+    pub row_policy: Option<&'a Expression>,
+    /// Field ids of governance-masked columns to **remove** from every
+    /// returned data file's statistics (D-F2.1 column masking → column
+    /// removal on the scan-plan path; see `crate::governance`). Their column
+    /// sizes, value/null/NaN counts, and lower/upper bounds are omitted so a
+    /// masked column's values and value ranges never leave the catalog.
+    /// `None` when no column is masked.
+    pub strip_fields: Option<&'a BTreeSet<i32>>,
 }
 
 /// Chunks a plan outcome into REST `ScanTasks` pages of at most
@@ -922,6 +971,30 @@ pub fn build_pages(
     if outcome.files.is_empty() {
         return vec![rest::scan_tasks_json(Vec::new(), Vec::new())];
     }
+    // Effective stats-keep: the request's `stats-fields` restriction with any
+    // governance-masked columns removed. A masked column's stats (sizes,
+    // counts, bounds) are then omitted from every returned data file, so its
+    // values and value ranges never leave the catalog (D-F2.1 column masking
+    // → column removal on the scan-plan path). When nothing is masked and
+    // there is no stats restriction, `keep` stays `None` (send everything).
+    let effective_keep: Option<BTreeSet<i32>> = match (ctx.stats_keep, ctx.strip_fields) {
+        (None, None) => None,
+        (Some(keep), None) => Some(keep.clone()),
+        (None, Some(strip)) => {
+            // Keep every field the plan could emit *except* the stripped
+            // ones. We do not know the full column universe here, so we
+            // signal "strip these" by keeping their complement lazily: the
+            // rest layer treats `None` as all, so instead we exclude via a
+            // dedicated strip set below. Materialize the union of every
+            // file's stat keys minus the strip set.
+            let mut universe: BTreeSet<i32> = BTreeSet::new();
+            for f in &outcome.files {
+                collect_stat_field_ids(&f.file, &mut universe);
+            }
+            Some(universe.difference(strip).copied().collect())
+        }
+        (Some(keep), Some(strip)) => Some(keep.difference(strip).copied().collect()),
+    };
     outcome
         .files
         .chunks(page_size)
@@ -948,13 +1021,13 @@ pub fn build_pages(
                 .map(|file| {
                     let refs: Vec<usize> =
                         file.delete_indices.iter().map(|i| local_of[i]).collect();
-                    let residual = apply_row_policy_seam(file.residual.clone());
+                    let residual = apply_row_policy_seam(file.residual.clone(), ctx.row_policy);
                     rest::file_scan_task_json(
                         rest::data_file_json(
                             &file.file,
                             file.spec_id,
                             rest::StatsFilter {
-                                keep: ctx.stats_keep,
+                                keep: effective_keep.as_ref(),
                                 types: ctx.column_types,
                             },
                         ),
@@ -1389,6 +1462,8 @@ mod tests {
         let ctx = SerializeContext {
             column_types: &column_types,
             stats_keep: None,
+            row_policy: None,
+            strip_fields: None,
         };
 
         let pages = build_pages(&outcome, &ctx, 2);

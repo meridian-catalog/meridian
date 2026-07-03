@@ -626,3 +626,119 @@ export interface SprawlSummary {
   owned_mirror_assets: number;
   health: SprawlHealth;
 }
+
+// ---------------------------------------------------------------------------
+// Governance (Pillar D): tags, policies, bindings, and analytics
+// ---------------------------------------------------------------------------
+
+export interface GovTag {
+  id: string;
+  key: string;
+  value: string;
+  rendered: string;
+  description: string | null;
+  created_at: string;
+}
+
+export interface ListTagsResponse {
+  tags: GovTag[];
+}
+
+export interface CreateTagRequest {
+  key: string;
+  value: string;
+  description?: string;
+}
+
+export interface AssignmentTarget {
+  securable_type: "table" | "namespace" | "column";
+  warehouse: string;
+  namespace: string;
+  table?: string;
+  column?: string;
+}
+
+export interface AssignTagRequest {
+  tag_id: string;
+  target: AssignmentTarget;
+  source?: "manual" | "classifier";
+  confidence?: number;
+  approved?: boolean;
+}
+
+export interface GovAssignment {
+  id: string;
+  tag_id: string;
+  securable_type: string;
+  securable_id: string;
+  column_name: string | null;
+  source: string;
+  approved: boolean;
+  created_at: string;
+}
+
+export type GovPolicyKind = "row_filter" | "column_mask" | "abac";
+
+export interface GovPolicy {
+  id: string;
+  name: string;
+  kind: GovPolicyKind;
+  version: number;
+  enabled: boolean;
+  // The typed AbacRule definition (shape depends on kind).
+  definition: unknown;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ListGovPoliciesResponse {
+  policies: GovPolicy[];
+}
+
+export interface CreateGovPolicyRequest {
+  name: string;
+  kind: GovPolicyKind;
+  definition: unknown;
+}
+
+export interface BindPolicyRequest {
+  target_type: "tag" | "table" | "namespace";
+  tag_id?: string;
+  warehouse?: string;
+  namespace?: string;
+  table?: string;
+}
+
+export interface GovBinding {
+  id: string;
+  policy_id: string;
+  target_type: string;
+  target_id: string;
+  bound_by: string;
+  created_at: string;
+}
+
+export interface EffectivePolicyResponse {
+  principal: string;
+  table: string;
+  purpose: string | null;
+  denied: boolean;
+  reason: string;
+  applied_policies: string[];
+  row_filter: unknown | null;
+  masked_columns: string[];
+}
+
+export interface DriftAlert {
+  table_id: string;
+  column: string;
+  tag: string;
+  issue: string;
+}
+
+export interface DriftResponse {
+  warehouse: string;
+  alert_count: number;
+  alerts: DriftAlert[];
+}
