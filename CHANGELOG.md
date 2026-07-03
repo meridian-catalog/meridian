@@ -12,6 +12,33 @@ releases begin, the project will adhere to
 
 ### Added
 
+- **Compaction executor** (bin-pack rewrite; built-in maintenance, new crate
+  `meridian-executor`; [design doc](docs/design/compaction.md),
+  [ADR 007](docs/adr/007-compaction-executor-arrow-parquet.md)). Reads a
+  table's current snapshot, groups live data files by partition, and bin-packs
+  the files below a target size (default 512 MiB, first-fit-decreasing) into
+  rewrite groups, skipping partitions with fewer than `min_input_files`
+  (default 5) candidates. Each group is read with `arrow`/`parquet`, realigned
+  to the table's current schema **by Iceberg field id** (not name or position;
+  field ids are written back into the output Parquet footer), and merged into
+  one file, with the hard assertion that rows-in equals rows-out (minus any
+  materialized deletes). Merge-on-read is applied during the rewrite: position-
+  and equality-**delete files** are materialized into the compacted output and
+  the fully-consumed delete files dropped (deletion vectors are refused with a
+  reason, not silently dropped). Column lower/upper bounds are recomputed from
+  the merged output for the primitive types with an unambiguous encoding; record
+  and null counts are exact. The result is returned as an Iceberg `RewriteFiles`
+  (`replace`) `CompactionPlan` — the add-snapshot `TableUpdate`s, the
+  optimistic `TableRequirement`s (assert the table has not moved), and the new
+  snapshot's manifests/manifest list — **without committing** (the commit path
+  applies it as a normal, audited, snapshot-rollback-revertible commit).
+  A **dry-run** mode reports the files it would write without writing; the
+  engine never deletes input data files (snapshot expiry does that later); and
+  re-running on an already-compacted table is a no-op (idempotent). Verified
+  end-to-end on real Parquet + real Iceberg manifests: file count drops, every
+  row survives, reversed-column and schema-evolved inputs realign, merge-on-read
+  rows are absent from the output, and the produced updates/manifests parse
+  back through `meridian-iceberg`.
 - **Catalog as code** — `meridian plan -f bundle.yaml` and
   `meridian apply -f bundle.yaml` reconcile a running server toward a versioned
   YAML bundle (`apiVersion: meridian.dev/v1`, `kind: CatalogBundle`) declaring

@@ -13,21 +13,30 @@ import type {
   CreateWebhookRequest,
   FeedResponse,
   Grant,
+  HealthHistoryResponse,
   HealthResponse,
   ListDeliveriesResponse,
   ListGrantsResponse,
+  ListJobsResponse,
   ListNamespacesResponse,
+  ListPoliciesResponse,
   ListPrincipalsResponse,
   ListRolesResponse,
+  ListSavingsResponse,
   ListTablesResponse,
   ListWarehousesResponse,
   ListWebhooksResponse,
   LoadTableResult,
   LoadViewResult,
+  MaintenanceJob,
   NamespaceResponse,
   PermissionsResponse,
+  SavingsRollupResponse,
   SearchResponse,
+  TableHealth,
+  TriggerJobRequest,
   VerifyChainResponse,
+  WarehouseHealthSummary,
   Webhook,
 } from "./types";
 
@@ -266,6 +275,35 @@ export const api = {
     request<ListDeliveriesResponse>(
       `/api/v2/webhooks/${encodeURIComponent(id)}/deliveries${qs({ status })}`,
     ),
+
+  // ---- maintenance (Pillar C) -----------------------------------------
+  warehouseHealthSummary: (warehouse: string) =>
+    request<WarehouseHealthSummary>(
+      `/api/v2/warehouses/${encodeURIComponent(warehouse)}/health-summary`,
+    ),
+  tableHealth: (warehouse: string, ns: string[], table: string) =>
+    request<TableHealth>(
+      `/api/v2/warehouses/${encodeURIComponent(warehouse)}/namespaces/${encodeNamespace(ns)}/tables/${encodeURIComponent(table)}/health`,
+    ),
+  tableHealthHistory: (warehouse: string, ns: string[], table: string, limit?: number) =>
+    request<HealthHistoryResponse>(
+      `/api/v2/warehouses/${encodeURIComponent(warehouse)}/namespaces/${encodeNamespace(ns)}/tables/${encodeURIComponent(table)}/health/history${qs({ limit })}`,
+    ),
+  listJobs: (params: { state?: string; table_id?: string; limit?: number }) =>
+    request<ListJobsResponse>(`/api/v2/maintenance/jobs${qs(params)}`),
+  getJob: (id: string) =>
+    request<MaintenanceJob>(`/api/v2/maintenance/jobs/${encodeURIComponent(id)}`),
+  triggerJob: (body: TriggerJobRequest) =>
+    request<MaintenanceJob>("/api/v2/maintenance/jobs", { method: "POST", body }),
+  cancelJob: (id: string) =>
+    request<MaintenanceJob>(`/api/v2/maintenance/jobs/${encodeURIComponent(id)}/cancel`, {
+      method: "POST",
+    }),
+  listPolicies: () => request<ListPoliciesResponse>("/api/v2/maintenance/policies"),
+  listSavings: (params: { table_id?: string; limit?: number }) =>
+    request<ListSavingsResponse>(`/api/v2/maintenance/savings${qs(params)}`),
+  savingsRollup: (months?: number) =>
+    request<SavingsRollupResponse>(`/api/v2/maintenance/savings/rollup${qs({ months })}`),
 };
 
 export type Api = typeof api;

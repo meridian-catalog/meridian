@@ -56,6 +56,28 @@ export function nsPath(levels: string[]): string {
   return levels.join(".");
 }
 
+/** Formats a byte count with binary units (KiB/MiB/GiB/TiB). */
+export function fmtBytes(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined) return "—";
+  if (bytes === 0) return "0 B";
+  const negative = bytes < 0;
+  let value = Math.abs(bytes);
+  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const rendered = unit === 0 ? String(value) : value.toFixed(value < 10 ? 2 : 1);
+  return `${negative ? "-" : ""}${rendered} ${units[unit]}`;
+}
+
+/** Formats an integer with thousands separators. */
+export function fmtCount(n: number | null | undefined): string {
+  if (n === null || n === undefined) return "—";
+  return n.toLocaleString();
+}
+
 // Namespace levels can contain dots, so a `.`-joined URL segment would be
 // ambiguous. Encode the level array into a single opaque, round-trippable URL
 // token by joining with the 0x1F unit separator (which levels may never

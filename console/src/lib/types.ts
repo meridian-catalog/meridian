@@ -382,3 +382,152 @@ export const SECURABLE_TYPES = [
   "table",
   "view",
 ] as const;
+
+// ---- maintenance (Pillar C) -----------------------------------------------
+
+export interface HealthMetrics {
+  total_bytes: number;
+  data_file_count: number;
+  small_file_ratio: number;
+  avg_file_bytes: number;
+  median_file_bytes: number;
+  delete_debt_ratio: number;
+  delete_file_count: number;
+  manifest_count: number;
+  avg_manifest_entries: number;
+  partition_skew: number;
+  snapshot_count: number;
+  oldest_snapshot_ms: number | null;
+  metadata_json_bytes: number;
+  file_size_histogram: Record<string, number>;
+}
+
+export interface Recommendation {
+  action: string;
+  reason: string;
+  impact: number;
+}
+
+export interface TableHealth {
+  table_id: string;
+  table_ident: string;
+  snapshot_id: number | null;
+  score: number;
+  metrics: HealthMetrics;
+  recommendations: Recommendation[];
+  computed_at: string;
+}
+
+export interface HealthHistoryResponse {
+  history: TableHealth[];
+}
+
+export interface WorstTable {
+  table_id: string;
+  table_ident: string;
+  namespace: string[];
+  name: string;
+  score: number;
+  small_file_ratio: number;
+  snapshot_count: number;
+  data_file_count: number;
+}
+
+export interface WarehouseHealthSummary {
+  warehouse: string;
+  tables_scored: number;
+  avg_score: number;
+  min_score: number;
+  healthy_count: number;
+  degraded_count: number;
+  unhealthy_count: number;
+  total_bytes: number;
+  total_data_files: number;
+  worst_tables: WorstTable[];
+}
+
+export interface MaintenanceJob {
+  id: string;
+  table_id: string;
+  job_type: string;
+  state: string;
+  policy_id: string | null;
+  spec: unknown;
+  created_by: string;
+  claimed_by: string | null;
+  attempts: number;
+  error: unknown | null;
+  result: unknown | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface ListJobsResponse {
+  jobs: MaintenanceJob[];
+}
+
+export interface MaintenancePolicy {
+  id: string;
+  scope: string;
+  scope_id: string;
+  scope_label: string;
+  target_file_size_bytes: number;
+  min_input_files: number;
+  snapshot_retention_count: number;
+  snapshot_retention_age_ms: number;
+  max_staleness_ms: number | null;
+  schedule: string | null;
+  window_start: string | null;
+  window_end: string | null;
+  cost_cap_usd_month: number | null;
+  exclusions: unknown;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ListPoliciesResponse {
+  policies: MaintenancePolicy[];
+}
+
+export interface SavingsRow {
+  id: string;
+  job_id: string;
+  table_id: string;
+  table_ident: string;
+  period: string;
+  bytes_before: number;
+  bytes_after: number;
+  files_before: number;
+  files_after: number;
+  bytes_saved: number;
+  files_removed: number;
+  est_get_requests_saved: number;
+  methodology: string;
+  created_at: string;
+}
+
+export interface ListSavingsResponse {
+  savings: SavingsRow[];
+}
+
+export interface SavingsRollupPeriod {
+  period: string;
+  job_count: number;
+  bytes_saved: number;
+  files_removed: number;
+  est_get_requests_saved: number;
+}
+
+export interface SavingsRollupResponse {
+  rollup: SavingsRollupPeriod[];
+}
+
+export interface TriggerJobRequest {
+  warehouse: string;
+  namespace: string;
+  table: string;
+  job_type?: string;
+  dry_run?: boolean;
+}
