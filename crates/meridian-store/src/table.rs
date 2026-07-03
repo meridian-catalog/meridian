@@ -84,6 +84,10 @@ pub struct NewTable<'a> {
     pub format_version: i16,
     /// Table properties, write-through-indexed.
     pub properties: &'a BTreeMap<String, String>,
+    /// Flattened column names and docs of the current schema, write-through
+    /// indexed for full-text search (migration 0010; see
+    /// [`crate::search::schema_search_text`]).
+    pub schema_text: Option<&'a str>,
     /// How the table came to be, recorded in the audit trail:
     /// `"create"`, `"register"`, or `"commit-create"`.
     pub origin: &'a str,
@@ -186,8 +190,8 @@ pub async fn create(
     let record: TableRecord = sqlx::query_as(&format!(
         "INSERT INTO tables
              (id, workspace_id, namespace_id, name, table_uuid, metadata_location,
-              pointer_version, format_version, properties)
-         VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8)
+              pointer_version, format_version, properties, schema_text)
+         VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9)
          RETURNING {SELECT_COLUMNS}"
     ))
     .bind(&id)
@@ -198,6 +202,7 @@ pub async fn create(
     .bind(table.metadata_location)
     .bind(table.format_version)
     .bind(Json(table.properties))
+    .bind(table.schema_text)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| {

@@ -76,6 +76,11 @@ pub struct DerivedTableState {
     /// The complete retained snapshot set of the new metadata; replaces the
     /// previous index rows (snapshot expiry removes rows).
     pub snapshots: Vec<SnapshotIndexRow>,
+    /// Flattened column names and docs of the new metadata's current schema
+    /// (see [`crate::search::schema_search_text`]), indexed for full-text
+    /// search by the trigger from migration 0010. `None` clears the index
+    /// text (a metadata without a resolvable current schema).
+    pub schema_text: Option<String>,
     /// Extra detail merged into the audit/outbox payload (snapshot ids,
     /// operation, …).
     pub event_details: Value,
@@ -308,13 +313,15 @@ impl PostgresCommitBackend {
                          previous_metadata_location = $2,
                          format_version = $3,
                          properties = $4,
+                         schema_text = $5,
                          updated_at = now()
-                     WHERE id = $5 AND pointer_version = $6",
+                     WHERE id = $6 AND pointer_version = $7",
                 )
                 .bind(&op.cas.new_metadata_location)
                 .bind(previous_location)
                 .bind(derived.format_version)
                 .bind(Json(&derived.properties))
+                .bind(derived.schema_text.as_deref())
                 .bind(&op.cas.table)
                 .bind(expected)
                 .execute(&mut *tx)
