@@ -12,6 +12,18 @@ releases begin, the project will adhere to
 
 ### Added
 
+- **Catalog as code** — `meridian plan -f bundle.yaml` and
+  `meridian apply -f bundle.yaml` reconcile a running server toward a versioned
+  YAML bundle (`apiVersion: meridian.dev/v1`, `kind: CatalogBundle`) declaring
+  warehouses, namespaces, roles, grants, and webhooks. `apply` is idempotent
+  (re-apply is a no-op), creates and updates only (**never deletes**; prune is
+  out of scope for v1 and surfaced as `would-delete` warnings), reports
+  per-resource success/failure, and exits non-zero on any failure. Bundle values
+  support `${ENV_VAR}` interpolation so secrets stay out of the file. Tables and
+  views are deliberately excluded — engines own them. Both commands talk only to
+  the public `/api/v2` and `/v1` APIs.
+  ([docs](docs/catalog-as-code.md), [ADR 006](docs/adr/006-catalog-as-code-bundles.md),
+  [e2e](conformance/e2e/tests/test_catalog_as_code.py)).
 - **Server-side scan planning** (IRC 1.11+ `planTableScan` /
   `fetchPlanningResult` / `cancelPlanning` / `fetchScanTasks`;
   [design doc](docs/design/scan-planning.md),
