@@ -2252,6 +2252,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "meridian-federation"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "meridian-common",
+ "meridian-iceberg",
+ "meridian-store",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "meridian-iceberg"
 version = "0.1.0"
 dependencies = [
@@ -2281,6 +2298,7 @@ dependencies = [
  "meridian-bench",
  "meridian-common",
  "meridian-executor",
+ "meridian-federation",
  "meridian-iceberg",
  "meridian-storage",
  "meridian-store",

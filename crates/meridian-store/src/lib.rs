@@ -8,6 +8,8 @@
 pub mod audit;
 pub mod commit;
 pub mod consumer;
+pub mod federation;
+pub mod foreign;
 pub mod health;
 pub mod maintenance;
 pub mod namespace;

@@ -1,0 +1,30 @@
+[package]
+name = "meridian-federation"
+description = "Catalog federation for Meridian: inbound mirror sync engine (B-F1) — a read-only IRC client that materializes an external catalog's namespaces and tables as foreign, non-writable assets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+meridian-common = { workspace = true }
+meridian-iceberg = { workspace = true }
+meridian-store = { workspace = true }
+
+chrono = { workspace = true }
+# The read-only IRC HTTP client (rustls, no system OpenSSL) — matching the
+# CLI's dependency-light client rather than a generated SDK.
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true

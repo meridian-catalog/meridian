@@ -49,6 +49,11 @@ pub struct TableRecord {
     pub format_version: i16,
     /// Table properties, write-through-indexed from metadata.
     pub properties: Json<BTreeMap<String, String>>,
+    /// Owning mirror when this is a *foreign* (read-only) asset synced from an
+    /// external catalog (Pillar B, B-F1); `None` for native, writable tables.
+    /// A commit against a table with `mirror_id` set is rejected at the commit
+    /// boundary — the external catalog is the write authority.
+    pub mirror_id: Option<String>,
     /// Creation time.
     pub created_at: DateTime<Utc>,
     /// Last update time.
@@ -57,12 +62,12 @@ pub struct TableRecord {
 
 const SELECT_COLUMNS: &str = "id, workspace_id, namespace_id, name, table_uuid, \
      metadata_location, previous_metadata_location, pointer_version, format_version, \
-     properties, created_at, updated_at";
+     properties, mirror_id, created_at, updated_at";
 
 /// [`SELECT_COLUMNS`] qualified with the `t.` alias for joined queries.
 const SELECT_COLUMNS_T: &str = "t.id, t.workspace_id, t.namespace_id, t.name, t.table_uuid, \
      t.metadata_location, t.previous_metadata_location, t.pointer_version, t.format_version, \
-     t.properties, t.created_at, t.updated_at";
+     t.properties, t.mirror_id, t.created_at, t.updated_at";
 
 /// A new table row to insert (used by create, register, and the
 /// commit-endpoint create transaction).
