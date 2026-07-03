@@ -14,7 +14,7 @@ this page was written; the page is updated whenever the surface changes.
 
 Beyond endpoint-level checks, the surface is exercised by real clients:
 the [e2e suite](../conformance/e2e/) (pyiceberg, DuckDB) and per-engine
-smoke tests (Flink) — see the
+smoke tests (Flink, Spark, Trino) — see the
 [engine conformance matrix](../conformance/engines/README.md).
 
 > [!WARNING]
@@ -73,9 +73,9 @@ piece is missing · **Not yet** — returns 404/405.
 | Operation | Endpoint | Status | Notes |
 |---|---|---|---|
 | `listTables` | `GET .../namespaces/{ns}/tables` | Implemented | Pagination: see divergence (a). |
-| `createTable` | `POST .../namespaces/{ns}/tables` | Partial | `stage-create` supported (metadata returned, nothing persisted until the create transaction commits with `assert-create`). `format-version` property selects format 1–3 (default 2). No credential vending: the `X-Iceberg-Access-Delegation` header is ignored; `config` carries the warehouse's non-secret storage options only (see [Storage config passthrough](#storage-config-passthrough)). Partition-spec numbering: see divergence (d). Name collisions with views: see divergence (g). **Missing:** incoming schema field ids are validated as-is instead of being treated as provisional and reassigned server-side (the Java reference runs `AssignFreshIds`); Flink's connector sends 0-based provisional ids, so Flink `CREATE TABLE` is rejected with 400 `field id 0 is not positive`. Found by the [Flink smoke](../conformance/engines/flink/README.md#known-issues), which documents a workaround. |
+| `createTable` | `POST .../namespaces/{ns}/tables` | Implemented | `stage-create` supported (metadata returned, nothing persisted until the create transaction commits with `assert-create`). `format-version` property selects format 1–3 (default 2). Request field ids are treated as provisional, like the Java reference (`AssignFreshIds`): the server assigns fresh 1-based ids (nested types included) and remaps `identifier-field-ids` and partition-spec/sort-order source ids; a requested partition spec becomes the table's only spec, `spec-id: 0` (divergence (d), resolved). Flink's 0-based connector ids, which used to be rejected, are covered by the [Flink smoke](../conformance/engines/flink/README.md). No credential vending: the `X-Iceberg-Access-Delegation` header is ignored; `config` carries the warehouse's non-secret storage options only (see [Storage config passthrough](#storage-config-passthrough)). Name collisions with views: see divergence (g). |
 | `loadTable` | `GET .../tables/{table}` | Implemented | `snapshots=all\|refs`; strong `ETag` and `If-None-Match` → 304 (see [ETags](#etags)). No credential vending; `config` carries non-secret storage options only (see [Storage config passthrough](#storage-config-passthrough)). |
-| `updateTable` (commit) | `POST .../tables/{table}` | Implemented | The single-table commit path: requirements checked against the current metadata, unknown update/requirement types → 400 (as the spec requires), bounded compare-and-swap retry (409 `CommitFailedException` after 3 lost races), `assert-create` finalizes a stage-create transaction. `Idempotency-Key` honored (see [Idempotency keys](#idempotency-keys)). Exercised end-to-end by pyiceberg (appends, schema evolution, two concurrent writers) and by Flink's checkpoint-driven streaming commits — see the [engine matrix](../conformance/engines/README.md). |
+| `updateTable` (commit) | `POST .../tables/{table}` | Implemented | The single-table commit path: requirements checked against the current metadata, unknown update/requirement types → 400 (as the spec requires), bounded compare-and-swap retry (409 `CommitFailedException` after 3 lost races), `assert-create` finalizes a stage-create transaction. `Idempotency-Key` honored (see [Idempotency keys](#idempotency-keys)). Exercised end-to-end by pyiceberg (appends, schema evolution, two concurrent writers), by Flink's checkpoint-driven streaming commits, and by Spark's merge-on-read row-level operations — `MERGE INTO` and `DELETE FROM` commit position-delete files through this path, and Trino reads the resulting table back exactly (cross-engine, verified) — see the [engine matrix](../conformance/engines/README.md). |
 | `dropTable` | `DELETE .../tables/{table}` | Implemented | `purgeRequested=true` semantics: see divergence (e). |
 | `tableExists` | `HEAD .../tables/{table}` | Implemented | 204 / 404. |
 | `registerTable` | `POST .../namespaces/{ns}/register` | Partial | Adopts an existing metadata file as-is (it must parse and live under the warehouse root). **Missing:** `overwrite: true` is rejected with 400. Adopting a UUID that belongs to a live table is rejected: see divergence (c). |
@@ -100,9 +100,9 @@ piece is missing · **Not yet** — returns 404/405.
 | Operation | Endpoint | Status | Notes |
 |---|---|---|---|
 | `listViews` | `GET .../namespaces/{ns}/views` | Implemented | RBAC: `LIST_TABLES` on the namespace. Pagination: see divergence (a). |
-| `createView` | `POST .../namespaces/{ns}/views` | Implemented | RBAC: `CREATE_VIEW` on the namespace. Multiple SQL representations per version (at most one per dialect, case-insensitive). 409 when the name exists as a view **or a table**: see divergence (g). Default location is uuid-suffixed under the namespace path, like tables. |
+| `createView` | `POST .../namespaces/{ns}/views` | Implemented | RBAC: `CREATE_VIEW` on the namespace. Multiple SQL representations per version (at most one per dialect, case-insensitive). 409 when the name exists as a view **or a table**: see divergence (g). Default location is uuid-suffixed under the namespace path, like tables. Request field ids are treated as provisional, exactly as on `createTable`: fresh 1-based ids are assigned server-side. Spark 3.5's `CREATE VIEW` numbers the output schema from 0 and used to be rejected with `field id 0 is not positive`; covered by the [Spark smoke](../conformance/engines/spark/README.md). |
 | `loadView` | `GET .../views/{view}` | Implemented | RBAC: `READ` on the view. `config` carries the warehouse's non-secret storage options (see [Storage config passthrough](#storage-config-passthrough)). No `ETag`: the spec defines the `ETag`/`If-None-Match` mechanism for table responses only (`LoadViewResponse` has no `etag` header). The `referenced-by` parameter is accepted and ignored (the caller's own `READ` on the view decides access; chain-based decisions are not implemented). |
-| `replaceView` | `POST .../views/{view}` | Implemented | RBAC: `COMMIT` on the view, checked before anything is staged. The view commit path: `assert-view-uuid` checked against current metadata, unknown update/requirement types → 400, updates applied through the validating view-metadata builder (version log grows per current-version change, versions expire per `version.history.num-entries`), bounded compare-and-swap retry (409 `CommitFailedException` after 3 lost races). **Missing:** `Idempotency-Key` is not honored on view endpoints (see [Idempotency keys](#idempotency-keys)); dialect-drop protection (`replace.drop-dialect.allowed`) is not enforced yet (builder TODO). |
+| `replaceView` | `POST .../views/{view}` | Implemented | RBAC: `COMMIT` on the view, checked before anything is staged. The view commit path: `assert-view-uuid` checked against current metadata, unknown update/requirement types → 400, updates applied through the validating view-metadata builder (version log grows per current-version change, versions expire per `version.history.num-entries`), bounded compare-and-swap retry (409 `CommitFailedException` after 3 lost races). **Missing:** `Idempotency-Key` is not honored on view endpoints (see [Idempotency keys](#idempotency-keys)); dialect-drop protection (`replace.drop-dialect.allowed`) is not enforced yet (builder TODO). **Known gap:** `add-schema` updates on the replace path validate field ids strictly (must be positive), but view schemas have no cross-version field-id continuity to protect and the Java reference accepts whatever ids the client sends — so Spark 3.5's `CREATE OR REPLACE VIEW` on an *existing* view fails with `field id 0 is not positive` (0-based ids, same shape as the resolved create-path bug). Reproduced by the [Spark smoke](../conformance/engines/spark/README.md#known-gap-create-or-replace-view); initial `CREATE VIEW` is unaffected. |
 | `dropView` | `DELETE .../views/{view}` | Implemented | RBAC: `DROP` on the view. 204; the spec defines no purge for views, so metadata files always remain in object storage. |
 | `viewExists` | `HEAD .../views/{view}` | Implemented | RBAC: `READ` on the view. 204 / 404. |
 | `renameView` | `POST /v1/{prefix}/views/rename` | Implemented | RBAC: `WRITE` on the source view **and** `CREATE_VIEW` on the destination namespace. Rename or move across namespaces within one warehouse; 409 when the destination exists as a view **or a table** (divergence (g)); 204. |
@@ -155,14 +155,16 @@ warehouse). The full conventions are documented in
 [`crates/meridian-server/src/routes/tables.rs`](../crates/meridian-server/src/routes/tables.rs)
 (module docs).
 
-### (d) `createTable` numbers a requested partition spec as id 1
+### (d) Resolved: `createTable` used to number a requested partition spec as id 1
 
-A table created with a partition spec carries **two** specs in its metadata:
-the empty (unpartitioned) spec as `spec-id: 0` and the requested spec as
-`spec-id: 1`, with `default-spec-id: 1`. The Java reference implementation
-numbers the requested spec 0. This is benign: engines resolve the active spec
-through `default-spec-id`, never by assuming spec 0. (A requested spec that
-is itself unpartitioned is structurally identical to spec 0 and reuses id 0.)
+Historical — fixed alongside provisional field-id assignment; the letter is
+kept so older references stay meaningful. A table created with a partition
+spec used to carry **two** specs in its metadata: the empty (unpartitioned)
+spec as `spec-id: 0` and the requested spec as `spec-id: 1`, with
+`default-spec-id: 1`. Meridian now matches the Java reference
+implementation: the requested spec is the table's only spec, numbered 0.
+Spec **evolution** on an existing table is unchanged (added specs append
+with the next id; existing specs are never renumbered).
 
 ### (e) `purgeRequested=true` deletes metadata now; data files wait for the maintenance worker
 

@@ -12,16 +12,29 @@ releases begin, the project will adhere to
 
 ### Added
 
-- **Engine conformance matrix and Flink smoke test**
+- **Engine conformance matrix with Flink, Spark, and Trino smoke suites**
   ([conformance/engines/](conformance/engines/README.md)): pyiceberg
   0.11.1 and DuckDB 1.5.4 pass the e2e suite (full table lifecycle,
   concurrent writers, views, S3/MinIO storage-config vending); Flink 1.20
   passes batch inserts, checkpoint-driven streaming commits, and
-  read-back, and exposed a real `createTable` bug — Meridian rejects the
+  read-back, and exposed a real `createTable` bug — Meridian rejected the
   connector's 0-based provisional field ids instead of assigning fresh
-  ids server-side (documented with a workaround in
-  [docs/api-status.md](docs/api-status.md) and the Flink README; Spark
-  and Trino runs are still pending).
+  ids server-side (since fixed; see **Fixed** below). Spark 3.5.6
+  (iceberg-spark-runtime 1.11.0) passes a fuller smoke
+  ([conformance/engines/spark/](conformance/engines/spark/README.md)):
+  partitioned DDL, batched inserts, aggregates, `ADD COLUMN` with NULL
+  backfill, `VERSION AS OF` time travel, merge-on-read `MERGE INTO` and
+  `DELETE FROM` (position-delete files verified over REST), and Iceberg
+  view create/read — which exposed the `createView` twin of the field-id
+  bug (since fixed; see **Fixed** below). Trino 482 passes its own suite
+  ([conformance/engines/trino/](conformance/engines/trino/README.md)):
+  schema and partitioned-table DDL (via the `stage-create` →
+  `assert-create` path; the schema needs an explicit `location`, a
+  documented gap), inserts, schema evolution, views, and — cross-engine —
+  reads Spark's post-`MERGE`/`DELETE` table exactly, proving Spark's
+  merge-on-read position-delete files apply correctly through a second
+  engine. Trino cleanly rejects Spark's `spark`-dialect view (cross-engine
+  view portability needs multi-dialect representations; documented).
 - **Catalog benchmark harness (`meridian-bench`)** under
   [testing/bench/](testing/bench/README.md) — catalog-plane HTTP latency
   scenarios (`get-config`, `load-table` concurrency sweep, `commit`)
@@ -97,6 +110,33 @@ releases begin, the project will adhere to
 - **Documentation**: development guide, architecture decision records
   (ADRs 001–004), commit-protocol design document, and the API status
   matrix.
+
+### Fixed
+
+- **`createTable` now treats request field ids as provisional and assigns
+  fresh ones server-side**, matching the Java reference implementation
+  (`AssignFreshIds`): schema field ids are reassigned 1-based (nested
+  struct/list/map fields included), and `identifier-field-ids`,
+  partition-spec source ids, and sort-order source ids are remapped
+  accordingly. This fixes the Flink `CREATE TABLE` rejection found by the
+  engine conformance smoke (`invalid schema: field id 0 is not positive` —
+  Flink's connector numbers provisional ids from 0), and the smoke's
+  pre-create workaround is removed; Flink table DDL now passes end to end.
+  In the same change, a table created with a partition spec now carries
+  exactly one spec, numbered 0, like the reference implementation
+  (previously the requested spec was numbered 1 next to a phantom empty
+  spec 0 — documented divergence (d), now resolved). Commit-path
+  `add-schema` updates still validate field ids strictly; ids there are
+  real, not provisional.
+- **`createView` treats request field ids as provisional too.** Spark
+  3.5's `CREATE VIEW` numbers the view's output schema from 0, and
+  Meridian rejected it with the same `field id 0 is not positive` error
+  the Flink smoke hit on tables. View create requests now get fresh
+  1-based field ids server-side, mirroring `createTable`. Found by the
+  [Spark conformance smoke](conformance/engines/spark/README.md). Known
+  remaining gap: `replaceView` still validates ids strictly, so Spark's
+  `CREATE OR REPLACE VIEW` on an existing view fails; documented in
+  [docs/api-status.md](docs/api-status.md#views).
 
 ### Security
 
