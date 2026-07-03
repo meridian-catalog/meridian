@@ -120,10 +120,13 @@ async fn enqueue(pool: &PgPool, short_type: &str) -> String {
     .expect("enqueue event")
 }
 
-/// Runs the relay under the cross-binary lock until the given events are
-/// published (bounded).
-async fn relay_until_published(pool: &PgPool, url: &str, ids: &[String]) {
-    let _lock = relay_test_lock(url).await;
+/// Runs the relay until the given events are published (bounded).
+///
+/// The caller must already hold the feed serialization lock
+/// ([`relay_test_lock`]) for the whole test: enqueues are not otherwise
+/// serialized, so a concurrent test could insert an unpublished event older
+/// than `ids` and stall the publication frontier below them.
+async fn relay_until_published(pool: &PgPool, ids: &[String]) {
     for _ in 0..1_000 {
         let mut done = true;
         for id in ids {
@@ -284,6 +287,9 @@ async fn feed_paginates_and_filters_published_events() {
     let Some((router, pool, url)) = test_app().await else {
         return;
     };
+    // Held for the whole test: serializes every enqueue+relay+read against
+    // other feed tests so the publication frontier stays predictable.
+    let _serial = relay_test_lock(&url).await;
 
     let type_a = unique("test.feed-a");
     let type_b = unique("test.feed-b");
@@ -292,7 +298,7 @@ async fn feed_paginates_and_filters_published_events() {
     let e1 = enqueue(&pool, &type_a).await;
     let e2 = enqueue(&pool, &type_a).await;
     let e3 = enqueue(&pool, &type_b).await;
-    relay_until_published(&pool, &url, &[e1.clone(), e2.clone(), e3.clone()]).await;
+    relay_until_published(&pool, &[e1.clone(), e2.clone(), e3.clone()]).await;
 
     // Type filters must be full CloudEvents types.
     let (status, _) = send(
@@ -368,6 +374,22 @@ async fn feed_paginates_and_filters_published_events() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(tail["events"], json!([]));
     assert!(tail["next_cursor"].as_str().is_some_and(|c| !c.is_empty()));
+
+    // order=desc returns the most recent matching events first (the UI
+    // "recent activity" view); e3 is newest, e1 oldest.
+    let (status, desc) = send(
+        &router,
+        "GET",
+        &format!("/api/v2/events?order=desc&types={both}&limit=3"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{desc}");
+    let desc_events = desc["events"].as_array().expect("events array");
+    assert_eq!(desc_events.len(), 3);
+    assert_eq!(desc_events[0]["id"], e3.as_str());
+    assert_eq!(desc_events[1]["id"], e2.as_str());
+    assert_eq!(desc_events[2]["id"], e1.as_str());
 }
 
 // ---------------------------------------------------------------------------
@@ -379,6 +401,8 @@ async fn consumers_read_commit_and_never_lose_uncommitted_batches() {
     let Some((router, pool, url)) = test_app().await else {
         return;
     };
+    // Held for the whole test — see the feed test for why.
+    let _serial = relay_test_lock(&url).await;
 
     let name = unique("consumer");
     let feed_type = unique("test.consumer");
@@ -414,7 +438,7 @@ async fn consumers_read_commit_and_never_lose_uncommitted_batches() {
     let e1 = enqueue(&pool, &feed_type).await;
     let e2 = enqueue(&pool, &feed_type).await;
     let e3 = enqueue(&pool, &feed_type).await;
-    relay_until_published(&pool, &url, &[e1.clone(), e2.clone(), e3.clone()]).await;
+    relay_until_published(&pool, &[e1.clone(), e2.clone(), e3.clone()]).await;
 
     // First batch; a re-read without commit returns the same batch
     // (at-least-once).
@@ -552,6 +576,8 @@ async fn webhooks_deliver_sign_retry_and_dead_letter() {
     let Some((router, pool, url)) = test_app().await else {
         return;
     };
+    // Held for the whole test — see the feed test for why.
+    let _serial = relay_test_lock(&url).await;
     let (receiver_url, inbox) = start_receiver().await;
 
     let feed_type = unique("test.delivery");
@@ -589,7 +615,7 @@ async fn webhooks_deliver_sign_retry_and_dead_letter() {
 
     // Publish one matching event; the relay fans out two deliveries.
     let event_id = enqueue(&pool, &feed_type).await;
-    relay_until_published(&pool, &url, std::slice::from_ref(&event_id)).await;
+    relay_until_published(&pool, std::slice::from_ref(&event_id)).await;
 
     let config = EventsConfig {
         webhook_max_attempts: 2,
@@ -599,33 +625,37 @@ async fn webhooks_deliver_sign_retry_and_dead_letter() {
     };
     let client = events::webhook_client(&config).expect("webhook client");
 
-    // First pass: the healthy endpoint succeeds, the failing one records
-    // attempt 1 and stays pending.
-    let mut attempted = 0;
+    // Drive the dispatcher until THIS test's healthy delivery is delivered.
+    // dispatch_once is global, so counting attempts would race against any
+    // other pending delivery in the shared table; poll our own endpoint for
+    // the terminal state instead.
+    let mut ok_delivery = Value::Null;
     for _ in 0..50 {
-        attempted += events::dispatch_once(&pool, &client, &config)
+        events::dispatch_once(&pool, &client, &config)
             .await
             .expect("dispatch");
-        if attempted >= 2 {
+        let (status, ok_deliveries) = send(
+            &router,
+            "GET",
+            &format!("/api/v2/webhooks/{hook_ok_id}/deliveries"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let first = ok_deliveries["deliveries"][0].clone();
+        if first["status"] == "delivered" {
+            ok_delivery = first;
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(attempted >= 2, "both deliveries must be attempted");
-
-    let (status, ok_deliveries) = send(
-        &router,
-        "GET",
-        &format!("/api/v2/webhooks/{hook_ok_id}/deliveries"),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let delivered = &ok_deliveries["deliveries"][0];
-    assert_eq!(delivered["event_id"], event_id.as_str());
-    assert_eq!(delivered["status"], "delivered");
-    assert_eq!(delivered["last_status"], 200);
-    assert_eq!(delivered["event_type"], full_type.as_str());
+    assert_eq!(
+        ok_delivery["status"], "delivered",
+        "healthy webhook delivery must reach 'delivered'"
+    );
+    assert_eq!(ok_delivery["event_id"], event_id.as_str());
+    assert_eq!(ok_delivery["last_status"], 200);
+    assert_eq!(ok_delivery["event_type"], full_type.as_str());
 
     // Retry until dead-lettered (max_attempts = 2, zero backoff).
     for _ in 0..50 {
