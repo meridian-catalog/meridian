@@ -5,6 +5,7 @@ members = [
     "crates/meridian-store",
     "crates/meridian-iceberg",
     "crates/meridian-storage",
+    "crates/meridian-vending",
     "crates/meridian-server",
     "crates/meridian-cli",
     "testing/bench",
@@ -23,6 +24,7 @@ meridian-common = { path = "crates/meridian-common" }
 meridian-store = { path = "crates/meridian-store" }
 meridian-iceberg = { path = "crates/meridian-iceberg" }
 meridian-storage = { path = "crates/meridian-storage" }
+meridian-vending = { path = "crates/meridian-vending" }
 meridian-server = { path = "crates/meridian-server" }
 
 # Async runtime
@@ -74,9 +76,16 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # OIDC bearer-token validation (server authn)
 jsonwebtoken = "9.3"
 
-# Hashing
+# Credential vending: STS AssumeRole (AWS + MinIO). rustls everywhere, no
+# system OpenSSL, matching the reqwest configuration above.
+aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "rustls"] }
+aws-credential-types = "1"
+aws-sdk-sts = { version = "1", default-features = false, features = ["rt-tokio", "rustls"] }
+
+# Hashing & message authentication (webhook signatures)
 sha2 = "0.10"
 hex = "0.4"
+hmac = "0.12"
 
 # Testing (dev-dependencies only)
 proptest = "1.7"
