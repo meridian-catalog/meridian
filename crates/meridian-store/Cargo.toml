@@ -12,6 +12,7 @@ chrono = { workspace = true }
 hex = { workspace = true }
 meridian-common = { workspace = true }
 meridian-iceberg = { workspace = true }
+meridian-storage = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -21,8 +22,11 @@ tracing = { workspace = true }
 ulid = { workspace = true }
 
 [dev-dependencies]
+bytes = "1.10"
 proptest = { workspace = true }
+tempfile = "3.20"
 tokio = { workspace = true }
+uuid = { workspace = true }
 
 [lints]
 workspace = true

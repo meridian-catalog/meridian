@@ -8,6 +8,8 @@
 pub mod audit;
 pub mod commit;
 pub mod consumer;
+pub mod health;
+pub mod maintenance;
 pub mod namespace;
 pub mod outbox;
 pub mod planning;
