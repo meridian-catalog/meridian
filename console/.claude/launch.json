@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "console",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["exec", "next", "dev", "-p", "3100"],
+      "port": 3100,
+      "env": { "NEXT_PUBLIC_MERIDIAN_URL": "http://localhost:8181" }
+    }
+  ]
+}

@@ -211,6 +211,34 @@ pub async fn list_published(
     .map_err(|e| map_sqlx_error("failed to list published events", e))
 }
 
+/// Lists the most recently published events, newest first, bounded by the
+/// publication frontier. This backs UI "recent activity" views; durable
+/// consumers must use [`list_published`] (ascending, cursor-driven) instead
+/// — reverse order has no stable resumable cursor.
+pub async fn list_recent(
+    pool: &PgPool,
+    types: Option<&[String]>,
+    limit: i64,
+) -> Result<Vec<OutboxRecord>> {
+    sqlx::query_as(
+        "WITH frontier AS (
+             SELECT MIN(id) AS f FROM events_outbox WHERE published_at IS NULL
+         )
+         SELECT e.id, e.workspace_id, e.aggregate, e.event_type, e.payload, e.created_at
+         FROM events_outbox e, frontier
+         WHERE e.published_at IS NOT NULL
+           AND (frontier.f IS NULL OR e.id < frontier.f)
+           AND ($1::text[] IS NULL OR e.event_type = ANY($1))
+         ORDER BY e.id DESC
+         LIMIT $2",
+    )
+    .bind(types)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| map_sqlx_error("failed to list recent events", e))
+}
+
 /// The current end-of-feed cursor: the largest published id below the
 /// publication frontier, or the empty cursor when the feed is empty.
 ///

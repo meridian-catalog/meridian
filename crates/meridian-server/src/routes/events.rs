@@ -320,6 +320,12 @@ pub struct FeedQuery {
     /// Page size (default 100, max 1000).
     #[serde(default)]
     pub limit: Option<i64>,
+    /// Feed order. `asc` (default) is the cursor-driven order durable
+    /// consumers require. `desc` returns the most recent events first for
+    /// UI "recent activity" views; it ignores `after` and has no resumable
+    /// `next_cursor`.
+    #[serde(default)]
+    pub order: Option<String>,
 }
 
 /// Response body for feed reads (`GET /api/v2/events` and consumer
@@ -370,16 +376,28 @@ pub async fn list_events(
     Query(query): Query<FeedQuery>,
 ) -> Result<Json<FeedResponse>, ApiError> {
     require_management(&state.pool, &principal).await?;
-    let after = match query.after.as_deref() {
-        Some("latest") => outbox::latest_cursor(&state.pool).await?,
-        Some(after) => after.to_owned(),
-        None => String::new(),
-    };
     let types = parse_types(query.types.as_deref())?;
     let limit = query
         .limit
         .unwrap_or(DEFAULT_PAGE_SIZE)
         .clamp(1, MAX_PAGE_SIZE);
+
+    // Newest-first mode for UI activity views: no cursor semantics.
+    if query.order.as_deref() == Some("desc") {
+        let records = outbox::list_recent(&state.pool, types.as_deref(), limit).await?;
+        let next_cursor = records.last().map_or_else(String::new, |r| r.id.clone());
+        let events = records.iter().map(cloud_event).collect();
+        return Ok(Json(FeedResponse {
+            events,
+            next_cursor,
+        }));
+    }
+
+    let after = match query.after.as_deref() {
+        Some("latest") => outbox::latest_cursor(&state.pool).await?,
+        Some(after) => after.to_owned(),
+        None => String::new(),
+    };
     Ok(Json(
         read_feed(&state, &after, types.as_deref(), limit).await?,
     ))
