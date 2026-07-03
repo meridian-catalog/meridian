@@ -12,6 +12,9 @@ WORKDIR /build
 # justify the extra Dockerfile complexity.
 COPY Cargo.toml Cargo.lock rustfmt.toml ./
 COPY crates ./crates
+# Workspace members outside crates/: cargo needs every member manifest
+# present even when building only meridian-cli.
+COPY testing/bench ./testing/bench
 
 RUN cargo build --release --locked -p meridian-cli
 
