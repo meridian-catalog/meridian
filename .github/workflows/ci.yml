@@ -78,6 +78,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # The release build compiles Arrow/Parquet (pulled in by the compaction
+      # executor), which is memory-hungry and OOM-kills the compiler on the
+      # runner's 7 GB. Extra swap lets it complete without raising parallelism.
+      - name: Add build swap
+        run: |
+          sudo fallocate -l 10G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+
       - uses: docker/setup-buildx-action@v3
 
       - name: Build image (no push)
