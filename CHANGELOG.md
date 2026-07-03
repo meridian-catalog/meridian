@@ -12,6 +12,33 @@ releases begin, the project will adhere to
 
 ### Added
 
+- **Inbound catalog mirrors — the sync engine** (Pillar B, B-F1; new crate
+  `meridian-federation`; [ADR 008](docs/adr/008-federation-inbound-mirrors.md)).
+  A *mirror* is an external Iceberg REST Catalog (Polaris, Lakekeeper, Unity's
+  IRC endpoint, Snowflake Horizon, BigLake, Nessie — or another Meridian, since
+  Meridian is itself an IRC) that Meridian continuously syncs **from** as
+  read-only foreign assets. A sync run connects to the source with a minimal
+  read-only IRC client (`GET /v1/config`, list namespaces, list tables,
+  `loadTable`; `none` / static-bearer / OAuth2-client-credentials auth), walks
+  its namespaces and tables, and **materializes each table as an ordinary row
+  in the native `tables`/`namespaces` tables** tagged with a `mirror_id`, so
+  every read-side feature works on foreign assets immediately: they are
+  full-text **searchable**, health-scorable, and carry their real schema,
+  snapshots, current pointer, and source `metadata_location`. Sync is
+  **incremental** (a table whose `metadata_location` is unchanged is not
+  re-indexed) and reflects source deletions (a table that vanished is removed
+  through the audited path). A background worker (spawned by `meridian serve`
+  alongside the maintenance/events workers) syncs mirrors whose interval has
+  elapsed, and `POST /api/v2/mirrors/{name}/sync` runs one immediately. Foreign
+  assets are **conflict-free / read-only**: a commit, create, register, drop, or
+  rename targeting a foreign table (or its mirror-private warehouse) is rejected
+  with a `409 CommitFailedException` naming the source as the write authority.
+  Verified end to end by a real IRC-to-IRC mirror test (one Meridian catalog
+  mirrored into another over HTTP). Migration `0015_federation_foreign_assets`
+  adds the `mirror_id` column and scopes table-UUID uniqueness to native tables;
+  builds on the mirror config/CRUD/sprawl surface from
+  `0014_federation_mirrors`. Hive Metastore and Glue's native API are documented
+  as future source types.
 - **Compaction executor** (bin-pack rewrite; built-in maintenance, new crate
   `meridian-executor`; [design doc](docs/design/compaction.md),
   [ADR 007](docs/adr/007-compaction-executor-arrow-parquet.md)). Reads a

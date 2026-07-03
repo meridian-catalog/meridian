@@ -87,6 +87,18 @@ impl ApiError {
         Self::new(StatusCode::CONFLICT, "AlreadyExistsException", message)
     }
 
+    /// 409 `CommitFailedException` for a write against a **foreign** asset
+    /// (Pillar B, B-F1): a table/namespace synced read-only from an external
+    /// catalog. Unlike an ordinary commit conflict this is a *permanent*
+    /// property — the external catalog is the write authority — so the message
+    /// says so and points the writer at the source. The type is
+    /// `CommitFailedException` so engines treat it as a rejected commit rather
+    /// than a transient error to retry.
+    #[must_use]
+    pub fn foreign_read_only(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "CommitFailedException", message)
+    }
+
     /// 409 `NamespaceNotEmptyException`.
     #[must_use]
     pub fn namespace_not_empty(message: impl Into<String>) -> Self {

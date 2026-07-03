@@ -522,9 +522,11 @@ the authenticated principal that performed it.
 
 Warehouse management is a Meridian API, not part of the IRC surface:
 `GET`/`POST /api/v2/warehouses`, `DELETE /api/v2/warehouses/{name}`, plus
-`GET /api/v2/principals` for principal visibility and the RBAC management
+`GET /api/v2/principals` for principal visibility, the RBAC management
 API (`/api/v2/roles`, `/api/v2/grants`, `/api/v2/permissions` — see
-[Authorization (RBAC)](#authorization-rbac)). These sit behind the same
+[Authorization (RBAC)](#authorization-rbac)), and the federation API
+(`/api/v2/mirrors`, `/api/v2/federation/sprawl` — see
+[Federation](#federation-mirrors--sprawl-apiv2mirrors-apiv2federationsprawl)). These sit behind the same
 authentication middleware as the IRC surface (see the warning at the top
 about the disabled-by-default posture), and all of them — principal
 listing included — require management access in `oidc` mode.
@@ -588,3 +590,50 @@ no external search engine). CLI: `meridian search <query>`.
   row inside the query — fine at small grant counts, a benchmark-phase
   TODO recorded in `meridian_store::search`; no usage-based ranking, no
   semantic search (both are later slices of the search feature).
+
+### Federation: mirrors + sprawl (`/api/v2/mirrors`, `/api/v2/federation/sprawl`)
+
+Catalog federation (Pillar B): register *mirrors* — external catalogs
+(another Iceberg REST endpoint, or an AWS Glue Data Catalog) that Meridian
+tracks without owning their storage — and roll up a cross-catalog *sprawl*
+summary across everything Meridian knows (its own warehouses plus mirrors).
+CLI: `meridian mirror create|list|sync`, `meridian sprawl`.
+
+- **Mirror CRUD**: `GET`/`POST /api/v2/mirrors`, `GET`/`PATCH`/`DELETE
+  /api/v2/mirrors/{name}`. A mirror carries a `kind` (`iceberg-rest` |
+  `glue`), an `endpoint`, an optional `remote_catalog`, non-secret `config`
+  (secret-looking keys are redacted on read), an `enabled` flag, and a
+  `sync_interval_s` cadence. Mutations are audited and emit outbox events on
+  the same transaction, exactly like warehouse CRUD.
+- **Sync status + sync-now**: `GET /api/v2/mirrors/{name}/sync` returns the
+  mirror plus its recent sync-run history; `POST /api/v2/mirrors/{name}/sync`
+  runs the sync engine now (404 if unknown, 409 if disabled) and returns a
+  summary of what changed (inserted/updated/unchanged/removed). The scheduled
+  worker also pulls enabled mirrors on their own cadence. The sync engine
+  (`meridian-federation`, ADR 008) connects to the source over a read-only IRC
+  client (`GET /v1/config`, list namespaces/tables, `loadTable`; none /
+  static-bearer / OAuth2-client-credentials auth) and materializes each
+  mirrored table as an ordinary — but read-only — row in the native `tables`
+  table under a dedicated `mirror__<name>` warehouse, so search and health work
+  on foreign assets with no read-path changes. Sync is incremental (unchanged
+  `metadata_location` is skipped) and reflects source deletions.
+- **Foreign assets are read-only** (conflict-free federation): a foreign table
+  (`mirror_id` set) is the source catalog's to write. A `commit`, `create`,
+  `register`, `drop`, or `rename` targeting a foreign table — or any write
+  under a `mirror__<name>` warehouse — is rejected with a `409
+  CommitFailedException` that names the source as the write authority.
+- **Sprawl summary**: `GET /api/v2/federation/sprawl[?stale_threshold_s=]`
+  computes, across all sources: per-source asset counts (native warehouses
+  vs. mirrors; a mirror's private foreign warehouse is not double-counted),
+  duplicate/overlap detection (the same storage location registered in more
+  than one source — the zero-copy-register signal), staleness (mirrors not
+  synced within the threshold, default 24h), ownership gaps (mirror assets
+  with no known owner), and a health roll-up over the indexed native assets
+  reusing the maintenance health model.
+- **Authorization** (`oidc` mode): every federation endpoint requires
+  management access (admin or any `MANAGE_WAREHOUSE` grant) — federation
+  spans the whole workspace, the same bar as warehouse CRUD and the fleet
+  health summary.
+- **Console**: the **Federation** page lists mirrors with their sync status,
+  a create-mirror form, and the sprawl dashboard (per-source counts,
+  duplicates, stale mirrors, ownership, native health).

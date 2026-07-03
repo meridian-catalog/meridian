@@ -10,6 +10,7 @@ import type {
   AuditQueryResponse,
   ConfigResponse,
   CreateGrantRequest,
+  CreateMirrorRequest,
   CreateWebhookRequest,
   FeedResponse,
   Grant,
@@ -18,6 +19,7 @@ import type {
   ListDeliveriesResponse,
   ListGrantsResponse,
   ListJobsResponse,
+  ListMirrorsResponse,
   ListNamespacesResponse,
   ListPoliciesResponse,
   ListPrincipalsResponse,
@@ -29,10 +31,13 @@ import type {
   LoadTableResult,
   LoadViewResult,
   MaintenanceJob,
+  Mirror,
+  MirrorSyncStatus,
   NamespaceResponse,
   PermissionsResponse,
   SavingsRollupResponse,
   SearchResponse,
+  SprawlSummary,
   TableHealth,
   TriggerJobRequest,
   VerifyChainResponse,
@@ -304,6 +309,29 @@ export const api = {
     request<ListSavingsResponse>(`/api/v2/maintenance/savings${qs(params)}`),
   savingsRollup: (months?: number) =>
     request<SavingsRollupResponse>(`/api/v2/maintenance/savings/rollup${qs({ months })}`),
+
+  // ---- federation (Pillar B) ------------------------------------------
+  listMirrors: () => request<ListMirrorsResponse>("/api/v2/mirrors"),
+  createMirror: (body: CreateMirrorRequest) =>
+    request<Mirror>("/api/v2/mirrors", { method: "POST", body }),
+  deleteMirror: (name: string) =>
+    request<void>(`/api/v2/mirrors/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+      expectNoContent: true,
+    }),
+  syncMirror: (name: string) =>
+    request<{ id: string; status: string }>(
+      `/api/v2/mirrors/${encodeURIComponent(name)}/sync`,
+      { method: "POST" },
+    ),
+  mirrorSyncStatus: (name: string) =>
+    request<MirrorSyncStatus>(
+      `/api/v2/mirrors/${encodeURIComponent(name)}/sync`,
+    ),
+  sprawl: (staleThresholdS?: number) =>
+    request<SprawlSummary>(
+      `/api/v2/federation/sprawl${qs({ stale_threshold_s: staleThresholdS })}`,
+    ),
 };
 
 export type Api = typeof api;

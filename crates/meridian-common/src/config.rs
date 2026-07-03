@@ -41,6 +41,37 @@ pub struct AppConfig {
     pub planning: PlanningConfig,
     /// Autonomous table-maintenance settings (Pillar C worker).
     pub maintenance: MaintenanceConfig,
+    /// Catalog-federation settings (Pillar B inbound-mirror sync worker).
+    pub federation: FederationConfig,
+}
+
+/// Catalog-federation settings (`[federation]`): the background sync worker
+/// that pulls inbound mirrors (spec Pillar B, B-F1). Runs inside
+/// `meridian serve` alongside the maintenance and events workers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct FederationConfig {
+    /// Master switch. When `false` the sync worker is not spawned: mirrors can
+    /// still be registered and their config managed, and a manual `sync now`
+    /// still works, but nothing syncs on a schedule.
+    pub enabled: bool,
+    /// How often (seconds) the worker polls for a mirror that is due to sync
+    /// (never-synced, past its interval, or flagged by `sync now`).
+    pub poll_interval_secs: u64,
+    /// Per-HTTP-request timeout (seconds) when talking to a source catalog:
+    /// bounds each `GET /v1/config` / list / `loadTable` call so an
+    /// unresponsive source cannot stall a sync run indefinitely.
+    pub request_timeout_secs: u64,
+}
+
+impl Default for FederationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            poll_interval_secs: 60,
+            request_timeout_secs: 30,
+        }
+    }
 }
 
 /// Autonomous table-maintenance settings (`[maintenance]`): the background

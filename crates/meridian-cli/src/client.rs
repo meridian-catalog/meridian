@@ -453,6 +453,75 @@ pub(crate) async fn maintenance_savings_rollup(
     Ok(check(response).await?.json().await?)
 }
 
+// ---- federation (Pillar B): mirrors + sprawl -----------------------------
+
+/// `POST /api/v2/mirrors`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn mirror_create(
+    server: &str,
+    token: Option<&str>,
+    name: &str,
+    kind: &str,
+    endpoint: &str,
+    remote_catalog: Option<&str>,
+    config: &[(String, String)],
+    enabled: bool,
+    sync_interval_s: i32,
+) -> Result<Value, CliError> {
+    let cfg: serde_json::Map<String, Value> = config
+        .iter()
+        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+        .collect();
+    let mut body = json!({
+        "name": name,
+        "kind": kind,
+        "endpoint": endpoint,
+        "config": cfg,
+        "enabled": enabled,
+        "sync_interval_s": sync_interval_s,
+    });
+    if let Some(rc) = remote_catalog {
+        body["remote_catalog"] = Value::String(rc.to_owned());
+    }
+    let request = http_client()?
+        .post(format!("{}/api/v2/mirrors", base(server)))
+        .json(&body);
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
+/// `GET /api/v2/mirrors`.
+pub(crate) async fn mirror_list(server: &str, token: Option<&str>) -> Result<Value, CliError> {
+    let request = http_client()?.get(format!("{}/api/v2/mirrors", base(server)));
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
+/// `POST /api/v2/mirrors/{name}/sync`.
+pub(crate) async fn mirror_sync(
+    server: &str,
+    token: Option<&str>,
+    name: &str,
+) -> Result<Value, CliError> {
+    let request = http_client()?.post(format!("{}/api/v2/mirrors/{name}/sync", base(server)));
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
+/// `GET /api/v2/federation/sprawl`.
+pub(crate) async fn sprawl(
+    server: &str,
+    token: Option<&str>,
+    stale_threshold_s: Option<i64>,
+) -> Result<Value, CliError> {
+    let mut request = http_client()?.get(format!("{}/api/v2/federation/sprawl", base(server)));
+    if let Some(threshold) = stale_threshold_s {
+        request = request.query(&[("stale_threshold_s", threshold.to_string())]);
+    }
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
 /// Renders rows as a plain aligned text table.
 #[must_use]
 pub(crate) fn render_table(headers: &[&str], rows: &[Vec<String>]) -> String {

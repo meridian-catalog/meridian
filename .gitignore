@@ -76,3 +76,6 @@ charts/**/*.tgz
 *.log
 logs/
 *.local
+
+# Local Claude Code tooling (preview launch config, etc.)
+.claude/

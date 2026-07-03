@@ -166,6 +166,42 @@ pub(crate) fn connect_storage(warehouse: &WarehouseRecord) -> Result<Arc<dyn Sto
         .map_err(|e| storage_config_error(&warehouse.name, &e))
 }
 
+/// Connects storage for reading a **foreign** table's metadata (Pillar B).
+///
+/// A foreign asset's `metadata_location` points at the *source* catalog's
+/// storage (e.g. `s3://…` / `file://…`), not the mirror's synthetic
+/// `mirror://` warehouse root, so its metadata cannot be read through the
+/// warehouse profile. This derives a read profile rooted at the metadata file's
+/// table location (the path up to `/metadata/`), so `resolve` accepts the full
+/// location. The mirror warehouse's non-secret storage config (which may carry
+/// e.g. an S3 endpoint) is passed through; source credentials for non-public
+/// object stores are a separate concern (metadata federation reads the
+/// pointer/schema, not data files).
+fn connect_foreign_storage(
+    warehouse: &WarehouseRecord,
+    metadata_location: &str,
+) -> Result<Arc<dyn Storage>, ApiError> {
+    // The table location is everything before the conventional `/metadata/`
+    // segment; fall back to the whole location's parent if the convention does
+    // not hold (still a valid prefix for `resolve`).
+    let root = metadata_location
+        .rsplit_once("/metadata/")
+        .map(|(base, _)| base)
+        .or_else(|| metadata_location.rsplit_once('/').map(|(base, _)| base))
+        .unwrap_or(metadata_location);
+    // The mirror warehouse's storage config holds only the foreign markers
+    // (`meridian:foreign`, `meridian:mirror_id`), not storage options, so read
+    // with an empty option set. Filesystem sources need none; non-public object
+    // stores would need source credentials — out of scope for metadata
+    // federation (which reads the pointer/schema, not data files).
+    let options = std::collections::BTreeMap::new();
+    let profile = meridian_storage::StorageProfile::parse(root, &options)
+        .map_err(|e| storage_config_error(&warehouse.name, &e))?;
+    profile
+        .connect()
+        .map_err(|e| storage_config_error(&warehouse.name, &e))
+}
+
 /// A warehouse whose stored configuration cannot be connected is a server
 /// (operator) problem, not a client one — but the message must reach the
 /// operator, so it is not masked.
@@ -814,6 +850,9 @@ pub async fn create_table(
         &SecurableScope::namespace(&ctx.warehouse.id, chain),
     )
     .await?;
+    // A mirror's foreign warehouse holds only read-only mirror-synced assets
+    // (Pillar B, B-F1); native table creation there is rejected.
+    reject_if_foreign_warehouse(&ctx.warehouse)?;
     validate_table_name(&request.name)?;
 
     if table::get(&state.pool, &ctx.namespace.id, &request.name)
@@ -917,6 +956,39 @@ pub(crate) async fn resolve_table(
     Ok((warehouse, levels, record))
 }
 
+/// Rejects a write against a **foreign** (mirrored, read-only) table with a
+/// clear 409 that names the owning mirror and points the writer at the source
+/// catalog (Pillar B, B-F1). A no-op for native tables.
+pub(crate) fn reject_if_foreign(
+    record: &table::TableRecord,
+    levels: &[String],
+    name: &str,
+) -> Result<(), ApiError> {
+    if let Some(mirror_id) = &record.mirror_id {
+        return Err(ApiError::foreign_read_only(format!(
+            "table {:?} is a foreign asset mirrored from an external catalog \
+             (mirror {mirror_id}) and is read-only in Meridian; commit to the \
+             source catalog instead",
+            display_ident(levels, name)
+        )));
+    }
+    Ok(())
+}
+
+/// Rejects a native create/register under a mirror's **foreign warehouse**
+/// (which holds only mirror-synced, read-only assets). A no-op for native
+/// warehouses.
+pub(crate) fn reject_if_foreign_warehouse(warehouse: &WarehouseRecord) -> Result<(), ApiError> {
+    if meridian_store::foreign::storage_config_is_foreign(&warehouse.storage_config.0) {
+        return Err(ApiError::foreign_read_only(format!(
+            "warehouse {:?} holds foreign (read-only) assets mirrored from an \
+             external catalog; tables cannot be created or registered here",
+            warehouse.name
+        )));
+    }
+    Ok(())
+}
+
 /// `GET /{prefix}/namespaces/{namespace}/tables/{table}` — load a table.
 pub async fn load_table(
     State(state): State<AppState>,
@@ -958,7 +1030,14 @@ pub async fn load_table(
     let Some(metadata_location) = record.metadata_location.clone() else {
         return Err(no_such_table(&levels, &name));
     };
-    let storage = connect_storage(&warehouse)?;
+    // A foreign (mirrored) table's metadata lives in the source catalog's
+    // storage, addressed by its own location, not the mirror's synthetic
+    // warehouse root (Pillar B, B-F1).
+    let storage = if record.mirror_id.is_some() {
+        connect_foreign_storage(&warehouse, &metadata_location)?
+    } else {
+        connect_storage(&warehouse)?
+    };
     let mut metadata = read_table_metadata(storage.as_ref(), &metadata_location)
         .await
         .map_err(|e| current_metadata_unreadable(&metadata_location, &e))?;
@@ -1062,20 +1141,27 @@ pub async fn drop_table(
 ) -> Result<StatusCode, ApiError> {
     let warehouse = resolve_warehouse(&state.pool, &prefix).await?;
     let levels = decode_namespace_param(&raw_namespace)?;
-    // The table id joins the scope when the table exists; a caller denied
+    // The table record joins the scope when the table exists; a caller denied
     // here learns nothing about existence, and the store still 404s a
     // missing table for authorized callers.
-    let table_id = table::get_by_name(&state.pool, &warehouse.id, &levels, &name)
-        .await?
-        .map(|r| r.id);
+    let existing = table::get_by_name(&state.pool, &warehouse.id, &levels, &name).await?;
     let chain = namespace_scope_chain(&state.pool, &warehouse.id, &levels).await?;
     require(
         &state.pool,
         &principal,
         Privilege::Drop,
-        &SecurableScope::table(&warehouse.id, chain, table_id.as_deref()),
+        &SecurableScope::table(
+            &warehouse.id,
+            chain,
+            existing.as_ref().map(|r| r.id.as_str()),
+        ),
     )
     .await?;
+    // Foreign (mirrored) tables are managed only by the sync engine — a user
+    // drop is rejected (Pillar B, B-F1); removing the mirror removes them.
+    if let Some(existing) = &existing {
+        reject_if_foreign(existing, &levels, &name)?;
+    }
 
     let record = table::drop_table(
         &state.pool,
@@ -1131,23 +1217,31 @@ pub async fn rename_table(
     }
 
     // WRITE on the source table, CREATE_TABLE where it lands.
-    let source_id = table::get_by_name(
+    let source = table::get_by_name(
         &state.pool,
         &warehouse.id,
         &request.source.namespace,
         &request.source.name,
     )
-    .await?
-    .map(|r| r.id);
+    .await?;
     let source_chain =
         namespace_scope_chain(&state.pool, &warehouse.id, &request.source.namespace).await?;
     require(
         &state.pool,
         &principal,
         Privilege::Write,
-        &SecurableScope::table(&warehouse.id, source_chain, source_id.as_deref()),
+        &SecurableScope::table(
+            &warehouse.id,
+            source_chain,
+            source.as_ref().map(|r| r.id.as_str()),
+        ),
     )
     .await?;
+    // A foreign (mirrored) table cannot be renamed by a user — the source
+    // catalog owns its identity (Pillar B, B-F1).
+    if let Some(source) = &source {
+        reject_if_foreign(source, &request.source.namespace, &request.source.name)?;
+    }
     let dest_chain =
         namespace_scope_chain(&state.pool, &warehouse.id, &request.destination.namespace).await?;
     require(
@@ -1157,6 +1251,9 @@ pub async fn rename_table(
         &SecurableScope::namespace(&warehouse.id, dest_chain),
     )
     .await?;
+    // Renaming *into* a mirror's foreign warehouse is also rejected (it holds
+    // only mirror-synced assets).
+    reject_if_foreign_warehouse(&warehouse)?;
 
     table::rename(
         &state.pool,
@@ -1202,6 +1299,9 @@ pub async fn register_table(
         &SecurableScope::namespace(&ctx.warehouse.id, chain),
     )
     .await?;
+    // Registering a table into a mirror's foreign warehouse is rejected — it
+    // holds only read-only mirror-synced assets (Pillar B, B-F1).
+    reject_if_foreign_warehouse(&ctx.warehouse)?;
     validate_table_name(&request.name)?;
     if request.overwrite {
         // TODO(M1+): registerTable overwrite (pointer adoption over an
@@ -1337,33 +1437,42 @@ pub async fn commit_table(
         &json!({ "namespace": levels, "name": name, "request": body }),
     );
     let backend = commit_backend(&state, &principal);
-    let storage = connect_storage(&warehouse)?;
 
     // Authorize before the idempotency recall so an unauthorized caller
     // can never replay a recorded receipt: COMMIT on an existing table,
     // CREATE_TABLE on the namespace when the commit would create one.
     let record = table::get_by_name(&state.pool, &warehouse.id, &levels, &name).await?;
     let chain = namespace_scope_chain(&state.pool, &warehouse.id, &levels).await?;
-    match &record {
-        Some(existing) => {
-            require(
-                &state.pool,
-                &principal,
-                Privilege::Commit,
-                &SecurableScope::table(&warehouse.id, chain, Some(&existing.id)),
-            )
-            .await?;
-        }
-        None => {
-            require(
-                &state.pool,
-                &principal,
-                Privilege::CreateTable,
-                &SecurableScope::namespace(&warehouse.id, chain),
-            )
-            .await?;
-        }
+    if let Some(existing) = &record {
+        require(
+            &state.pool,
+            &principal,
+            Privilege::Commit,
+            &SecurableScope::table(&warehouse.id, chain, Some(&existing.id)),
+        )
+        .await?;
+        // Foreign (mirrored) tables are read-only: the external catalog is the
+        // write authority (Pillar B, B-F1). Reject after authorization so the
+        // rejection does not leak table existence to callers without COMMIT.
+        // This must precede connecting storage: a foreign warehouse's synthetic
+        // `mirror://` root is not a real storage target.
+        reject_if_foreign(existing, &levels, &name)?;
+    } else {
+        require(
+            &state.pool,
+            &principal,
+            Privilege::CreateTable,
+            &SecurableScope::namespace(&warehouse.id, chain),
+        )
+        .await?;
+        // A commit that would create a table under a mirror's foreign warehouse
+        // is likewise rejected — that warehouse holds only mirror-synced assets.
+        reject_if_foreign_warehouse(&warehouse)?;
     }
+
+    // Connect storage after the foreign guards (a foreign warehouse has no real
+    // storage root to connect); the replay and commit both need it.
+    let storage = connect_storage(&warehouse)?;
 
     // Idempotency recall (§3 step 2): replay before touching any state.
     if let Some(key) = &key
@@ -1801,6 +1910,10 @@ pub async fn commit_transaction(
             &SecurableScope::table(&warehouse.id, chain, Some(&record.id)),
         )
         .await?;
+        // A transaction touching any foreign (read-only) table is rejected as a
+        // whole, before staging — the external catalog owns those tables
+        // (Pillar B, B-F1).
+        reject_if_foreign(record, &identifier.namespace, &identifier.name)?;
     }
 
     let key = idempotency_key(&headers)?;

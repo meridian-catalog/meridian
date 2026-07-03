@@ -103,6 +103,29 @@ enum Command {
     #[command(subcommand)]
     Maintenance(MaintenanceCommand),
 
+    /// Manage catalog mirrors — external catalogs Meridian tracks (Pillar B).
+    #[command(subcommand)]
+    Mirror(MirrorCommand),
+
+    /// Show the cross-catalog sprawl summary (Pillar B).
+    ///
+    /// Rolls up across every catalog Meridian knows (its warehouses and
+    /// registered mirrors): per-source asset counts, duplicate storage
+    /// locations, stale mirrors, ownership gaps, and a health roll-up.
+    Sprawl {
+        /// Staleness threshold in seconds (default 86400 = 24h).
+        #[arg(long, value_name = "SECONDS")]
+        stale_threshold_s: Option<i64>,
+
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
     /// Diff a catalog-as-code bundle against a running server (read-only).
     ///
     /// Prints a create/update/noop/would-delete report. Deletes are never
@@ -441,6 +464,74 @@ enum WarehouseCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum MirrorCommand {
+    /// Register a mirror of an external catalog.
+    Create {
+        /// Mirror name, unique per workspace.
+        #[arg(long)]
+        name: String,
+
+        /// Source kind: iceberg-rest | glue.
+        #[arg(long)]
+        kind: String,
+
+        /// Connection endpoint (IRC base URI, or AWS region for Glue).
+        #[arg(long, value_name = "URI_OR_REGION")]
+        endpoint: String,
+
+        /// Remote catalog id within the endpoint, when applicable.
+        #[arg(long, value_name = "ID")]
+        remote_catalog: Option<String>,
+
+        /// Non-secret connection option as key=value (repeatable).
+        #[arg(long = "config", value_name = "KEY=VALUE")]
+        config: Vec<String>,
+
+        /// Register the mirror disabled (do not sync until enabled).
+        #[arg(long)]
+        disabled: bool,
+
+        /// Desired sync cadence in seconds (default 3600).
+        #[arg(long, default_value_t = 3600, value_name = "SECONDS")]
+        sync_interval_s: i32,
+
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// List registered mirrors with their sync status.
+    List {
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// Request an immediate sync of a mirror.
+    Sync {
+        /// Mirror name.
+        #[arg(value_name = "NAME")]
+        name: String,
+
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum NamespaceCommand {
     /// Create a namespace (multi-level as dot-separated, e.g. accounting.tax).
     Create {
@@ -499,6 +590,12 @@ fn main() -> ExitCode {
         Command::Grant(command) => run_async(run_grant(command)),
         Command::Events(command) => run_async(run_events(command)),
         Command::Maintenance(command) => run_async(run_maintenance(command)),
+        Command::Mirror(command) => run_async(run_mirror(command)),
+        Command::Sprawl {
+            stale_threshold_s,
+            server,
+            token,
+        } => run_async(run_sprawl(stale_threshold_s, server, token)),
         Command::Plan {
             file,
             server,
@@ -1259,6 +1356,251 @@ async fn maintenance_savings(
         client::render_table(&["PERIOD", "JOBS", "BYTES_SAVED", "FILES_REMOVED"], &rows)
     );
     Ok(())
+}
+
+// ---- federation (Pillar B): mirror + sprawl -------------------------------
+
+async fn run_mirror(command: MirrorCommand) -> Result<(), CliError> {
+    match command {
+        MirrorCommand::Create {
+            name,
+            kind,
+            endpoint,
+            remote_catalog,
+            config,
+            disabled,
+            sync_interval_s,
+            server,
+            token,
+        } => {
+            let cfg = parse_pairs(&config)?;
+            let created = client::mirror_create(
+                &server,
+                token.as_deref(),
+                &name,
+                &kind,
+                &endpoint,
+                remote_catalog.as_deref(),
+                &cfg,
+                !disabled,
+                sync_interval_s,
+            )
+            .await?;
+            let id = created.get("id").and_then(Value::as_str).unwrap_or("?");
+            println!("created mirror {name} (id {id}, kind {kind})");
+            Ok(())
+        }
+        MirrorCommand::List { server, token } => {
+            let body = client::mirror_list(&server, token.as_deref()).await?;
+            let mirrors = body
+                .get("mirrors")
+                .and_then(Value::as_array)
+                .ok_or_else(|| CliError("malformed response: missing mirrors".to_owned()))?;
+            if mirrors.is_empty() {
+                println!("no mirrors registered");
+                return Ok(());
+            }
+            let rows: Vec<Vec<String>> = mirrors
+                .iter()
+                .map(|m| {
+                    vec![
+                        field_str(m, "name"),
+                        field_str(m, "kind"),
+                        field_str(m, "endpoint"),
+                        m.get("enabled")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                            .to_string(),
+                        m.get("asset_count")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(0)
+                            .to_string(),
+                        m.get("last_sync_status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("never")
+                            .to_owned(),
+                        m.get("last_synced_at")
+                            .and_then(Value::as_str)
+                            .unwrap_or("-")
+                            .to_owned(),
+                    ]
+                })
+                .collect();
+            print!(
+                "{}",
+                client::render_table(
+                    &[
+                        "NAME",
+                        "KIND",
+                        "ENDPOINT",
+                        "ENABLED",
+                        "ASSETS",
+                        "STATUS",
+                        "LAST_SYNCED"
+                    ],
+                    &rows
+                )
+            );
+            Ok(())
+        }
+        MirrorCommand::Sync {
+            name,
+            server,
+            token,
+        } => {
+            let run = client::mirror_sync(&server, token.as_deref(), &name).await?;
+            let status = run.get("status").and_then(Value::as_str).unwrap_or("?");
+            println!("sync requested for mirror {name} (status {status})");
+            Ok(())
+        }
+    }
+}
+
+/// `meridian sprawl` — the cross-catalog sprawl summary as a set of tables.
+async fn run_sprawl(
+    stale_threshold_s: Option<i64>,
+    server: String,
+    token: Option<String>,
+) -> Result<(), CliError> {
+    let body = client::sprawl(&server, token.as_deref(), stale_threshold_s).await?;
+
+    let n = |k: &str| body.get(k).and_then(Value::as_i64).unwrap_or(0);
+    println!(
+        "sources: {}  (warehouses {}, mirrors {})   total assets: {}",
+        n("source_count"),
+        n("warehouse_count"),
+        n("mirror_count"),
+        n("total_assets"),
+    );
+    println!(
+        "ownership gaps: {}   owned mirror assets: {}",
+        n("ownership_gaps"),
+        n("owned_mirror_assets"),
+    );
+
+    print_sprawl_sources(&body);
+    print_sprawl_duplicates(&body);
+    print_sprawl_stale(&body);
+    print_sprawl_health(&body);
+    Ok(())
+}
+
+fn print_sprawl_sources(body: &Value) {
+    let Some(sources) = body.get("sources").and_then(Value::as_array) else {
+        return;
+    };
+    if sources.is_empty() {
+        return;
+    }
+    println!("\nper-source asset counts:");
+    let rows: Vec<Vec<String>> = sources
+        .iter()
+        .map(|s| {
+            vec![
+                field_str(s, "source_type"),
+                field_str(s, "name"),
+                field_str(s, "kind"),
+                field_i64(s, "asset_count").to_string(),
+            ]
+        })
+        .collect();
+    print!(
+        "{}",
+        client::render_table(&["TYPE", "NAME", "KIND", "ASSETS"], &rows)
+    );
+}
+
+fn print_sprawl_duplicates(body: &Value) {
+    let Some(dups) = body.get("duplicates").and_then(Value::as_array) else {
+        return;
+    };
+    if dups.is_empty() {
+        return;
+    }
+    println!("\nduplicate storage locations (registered in >1 source):");
+    let rows: Vec<Vec<String>> = dups
+        .iter()
+        .map(|d| {
+            let sources = d
+                .get("sources")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            vec![
+                field_str(d, "storage_location"),
+                field_i64(d, "source_count").to_string(),
+                sources,
+            ]
+        })
+        .collect();
+    print!(
+        "{}",
+        client::render_table(&["LOCATION", "SOURCES", "REGISTERED_IN"], &rows)
+    );
+}
+
+fn print_sprawl_stale(body: &Value) {
+    let Some(stale) = body.get("stale_mirrors").and_then(Value::as_array) else {
+        return;
+    };
+    if stale.is_empty() {
+        return;
+    }
+    println!("\nstale mirrors:");
+    let rows: Vec<Vec<String>> = stale
+        .iter()
+        .map(|m| {
+            vec![
+                field_str(m, "name"),
+                m.get("last_synced_at")
+                    .and_then(Value::as_str)
+                    .unwrap_or("never")
+                    .to_owned(),
+                m.get("age_seconds")
+                    .and_then(Value::as_i64)
+                    .map_or_else(|| "-".to_owned(), |s| format!("{s}s")),
+            ]
+        })
+        .collect();
+    print!(
+        "{}",
+        client::render_table(&["NAME", "LAST_SYNCED", "AGE"], &rows)
+    );
+}
+
+fn print_sprawl_health(body: &Value) {
+    let Some(health) = body.get("health").and_then(Value::as_object) else {
+        return;
+    };
+    let hn = |k: &str| health.get(k).and_then(Value::as_i64).unwrap_or(0);
+    let avg = health
+        .get("avg_score")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    println!(
+        "\nnative health rollup: {} tables scored, avg {:.0} \
+         (healthy {}, degraded {}, unhealthy {})",
+        hn("tables_scored"),
+        avg,
+        hn("healthy_count"),
+        hn("degraded_count"),
+        hn("unhealthy_count"),
+    );
+}
+
+/// Reads a string field, defaulting to `-`.
+fn field_str(v: &Value, key: &str) -> String {
+    v.get(key).and_then(Value::as_str).unwrap_or("-").to_owned()
+}
+
+/// Reads an integer field, defaulting to 0.
+fn field_i64(v: &Value, key: &str) -> i64 {
+    v.get(key).and_then(Value::as_i64).unwrap_or(0)
 }
 
 fn run_serve(all_in_one: bool, config_path: Option<&std::path::Path>) -> Result<(), MeridianError> {

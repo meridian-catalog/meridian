@@ -832,7 +832,7 @@ async fn table_by_id(
     sqlx::query_as::<_, table::TableRecord>(
         "SELECT id, workspace_id, namespace_id, name, table_uuid, metadata_location, \
                 previous_metadata_location, pointer_version, format_version, properties, \
-                created_at, updated_at
+                mirror_id, created_at, updated_at
          FROM tables WHERE id = $1",
     )
     .bind(table_id)

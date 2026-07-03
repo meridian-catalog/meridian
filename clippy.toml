@@ -3,5 +3,7 @@
 # doc-valid-idents: identifiers clippy's doc_markdown lint accepts without
 # backticks. ".." keeps clippy's built-in list (OAuth, JavaScript, ...);
 # IdP (identity provider) is standard authentication vocabulary used across
-# the auth module and the principal contract.
-doc-valid-idents = ["IdP", "IdPs", ".."]
+# the auth module and the principal contract. OAuth2 is the exact protocol
+# name (clippy already whitelists the bare "OAuth"); it recurs in the
+# federation mirror auth docs.
+doc-valid-idents = ["IdP", "IdPs", "OAuth2", ".."]

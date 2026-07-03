@@ -276,6 +276,29 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v2/events/consumers/{name}/commit",
             post(routes::events::consumer_commit),
         )
+        // Catalog federation (Pillar B): mirror CRUD, per-mirror sync status
+        // + sync-now, and the cross-catalog sprawl summary. Every route is
+        // management-gated (see routes::federation). The federation sync
+        // worker (concurrent crate) writes the mirror_assets + sync-run state
+        // these read.
+        .route(
+            "/api/v2/mirrors",
+            get(routes::federation::list_mirrors).post(routes::federation::create_mirror),
+        )
+        .route(
+            "/api/v2/mirrors/{name}",
+            get(routes::federation::get_mirror)
+                .patch(routes::federation::update_mirror)
+                .delete(routes::federation::delete_mirror),
+        )
+        .route(
+            "/api/v2/mirrors/{name}/sync",
+            get(routes::federation::get_sync_status).post(routes::federation::sync_now),
+        )
+        .route(
+            "/api/v2/federation/sprawl",
+            get(routes::federation::get_sprawl),
+        )
         // Unmatched routes and wrong methods must still speak the IRC error
         // envelope — engines parse error bodies, not just status codes.
         .fallback(route_not_found)
@@ -418,6 +441,20 @@ pub async fn serve(config: AppConfig, pool: PgPool) -> Result<()> {
         None
     };
 
+    // Catalog federation (Pillar B, B-F1): the inbound-mirror sync worker pulls
+    // due mirrors and materializes their tables as foreign (read-only) assets.
+    // Crash-safe: each run is recorded on the mirror and a `running` flag is
+    // reclaimed on the next pass, so aborting at shutdown is fine.
+    let federation_worker = if config.federation.enabled {
+        Some(tokio::spawn(meridian_federation::run_worker(
+            pool.clone(),
+            config.federation.clone(),
+        )))
+    } else {
+        tracing::info!("catalog federation sync worker disabled by configuration");
+        None
+    };
+
     let state = AppState {
         pool,
         config: Arc::new(config),
@@ -437,6 +474,9 @@ pub async fn serve(config: AppConfig, pool: PgPool) -> Result<()> {
     if let Some((worker, reconciler)) = maintenance_tasks {
         worker.abort();
         reconciler.abort();
+    }
+    if let Some(federation_worker) = federation_worker {
+        federation_worker.abort();
     }
     served?;
 

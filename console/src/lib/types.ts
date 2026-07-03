@@ -531,3 +531,98 @@ export interface TriggerJobRequest {
   job_type?: string;
   dry_run?: boolean;
 }
+
+// ---- federation (Pillar B): mirrors + sprawl -----------------------------
+
+export interface Mirror {
+  id: string;
+  name: string;
+  kind: string;
+  endpoint: string;
+  remote_catalog: string | null;
+  config: Record<string, string>;
+  enabled: boolean;
+  sync_interval_s: number;
+  last_synced_at: string | null;
+  last_sync_status: string | null;
+  last_sync_detail: string | null;
+  asset_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ListMirrorsResponse {
+  mirrors: Mirror[];
+}
+
+export interface SyncRun {
+  id: string;
+  status: string;
+  assets_seen: number;
+  detail: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
+export interface MirrorSyncStatus {
+  mirror: Mirror;
+  history: SyncRun[];
+}
+
+export interface CreateMirrorRequest {
+  name: string;
+  kind: string;
+  endpoint: string;
+  remote_catalog?: string;
+  config?: Record<string, string>;
+  enabled?: boolean;
+  sync_interval_s?: number;
+}
+
+export interface SprawlSource {
+  source_type: string;
+  source_id: string;
+  name: string;
+  kind: string;
+  asset_count: number;
+  last_synced_at: string | null;
+}
+
+export interface SprawlDuplicate {
+  storage_location: string;
+  source_count: number;
+  sources: string[];
+}
+
+export interface SprawlStaleMirror {
+  mirror_id: string;
+  name: string;
+  last_synced_at: string | null;
+  age_seconds: number | null;
+  sync_interval_s: number;
+}
+
+export interface SprawlHealth {
+  tables_scored: number;
+  avg_score: number;
+  unhealthy_count: number;
+  degraded_count: number;
+  healthy_count: number;
+  total_bytes: number;
+}
+
+export interface SprawlSummary {
+  stale_threshold_s: number;
+  source_count: number;
+  warehouse_count: number;
+  mirror_count: number;
+  total_assets: number;
+  sources: SprawlSource[];
+  duplicates: SprawlDuplicate[];
+  duplicate_count: number;
+  duplicates_truncated: boolean;
+  stale_mirrors: SprawlStaleMirror[];
+  ownership_gaps: number;
+  owned_mirror_assets: number;
+  health: SprawlHealth;
+}

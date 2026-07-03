@@ -17,6 +17,7 @@ http = { workspace = true }
 jsonwebtoken = { workspace = true }
 meridian-common = { workspace = true }
 meridian-executor = { workspace = true }
+meridian-federation = { workspace = true }
 meridian-iceberg = { workspace = true }
 meridian-storage = { workspace = true }
 meridian-store = { workspace = true }
