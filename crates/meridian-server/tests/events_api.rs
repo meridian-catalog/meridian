@@ -120,6 +120,33 @@ async fn enqueue(pool: &PgPool, short_type: &str) -> String {
     .expect("enqueue event")
 }
 
+/// Publishes every outbox event with id at or below `max_id`, so the
+/// publication frontier (MIN unpublished id) sits strictly above it and the
+/// feed will serve events up to `max_id`.
+///
+/// Concurrent commits in *other* test binaries enqueue outbox events without
+/// the relay lock; one older than a feed test's events would otherwise stall
+/// the frontier below them. The set of events at/below `max_id` is finite
+/// (ULIDs are time-ordered; newer commits get larger ids), so this
+/// terminates. Only the frontier-sensitive feed/consumer tests call it —
+/// the delivery test must not publish foreign events early.
+async fn publish_through(pool: &PgPool, max_id: &str) {
+    for _ in 0..1_000 {
+        let blocking: Option<String> = sqlx::query_scalar(
+            "SELECT MIN(id) FROM events_outbox WHERE published_at IS NULL AND id <= $1",
+        )
+        .bind(max_id)
+        .fetch_one(pool)
+        .await
+        .expect("read frontier");
+        if blocking.is_none() {
+            return;
+        }
+        outbox::relay_once(pool, 500).await.expect("relay_once");
+    }
+    panic!("outbox did not drain to {max_id} within the iteration budget");
+}
+
 /// Runs the relay until the given events are published (bounded).
 ///
 /// The caller must already hold the feed serialization lock
@@ -296,9 +323,12 @@ async fn feed_paginates_and_filters_published_events() {
     let start = latest_cursor(&router).await;
 
     let e1 = enqueue(&pool, &type_a).await;
+    tokio::time::sleep(Duration::from_millis(2)).await;
     let e2 = enqueue(&pool, &type_a).await;
+    tokio::time::sleep(Duration::from_millis(2)).await;
     let e3 = enqueue(&pool, &type_b).await;
     relay_until_published(&pool, &[e1.clone(), e2.clone(), e3.clone()]).await;
+    publish_through(&pool, &e3).await;
 
     // Type filters must be full CloudEvents types.
     let (status, _) = send(
@@ -436,9 +466,12 @@ async fn consumers_read_commit_and_never_lose_uncommitted_batches() {
     assert_eq!(status, StatusCode::CONFLICT);
 
     let e1 = enqueue(&pool, &feed_type).await;
+    tokio::time::sleep(Duration::from_millis(2)).await;
     let e2 = enqueue(&pool, &feed_type).await;
+    tokio::time::sleep(Duration::from_millis(2)).await;
     let e3 = enqueue(&pool, &feed_type).await;
     relay_until_published(&pool, &[e1.clone(), e2.clone(), e3.clone()]).await;
+    publish_through(&pool, &e3).await;
 
     // First batch; a re-read without commit returns the same batch
     // (at-least-once).

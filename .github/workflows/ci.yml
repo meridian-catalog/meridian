@@ -56,6 +56,9 @@ jobs:
       # Database-backed tests in meridian-store read this; without it they
       # skip, so setting it here is what makes CI actually exercise them.
       DATABASE_URL: postgres://meridian:meridian@localhost:5432/meridian
+      # Cap each test binary's connection pool so the several binaries cargo
+      # runs in parallel stay well under Postgres's connection limit.
+      MERIDIAN__DATABASE__MAX_CONNECTIONS: 5
     steps:
       - uses: actions/checkout@v5
 
