@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use meridian_common::{AppConfig, MeridianError};
 use serde_json::Value;
 
+mod bundle;
 mod client;
 
 use client::CliError;
@@ -97,6 +98,42 @@ enum Command {
     /// Follow the catalog event feed on a running server.
     #[command(subcommand)]
     Events(EventsCommand),
+
+    /// Diff a catalog-as-code bundle against a running server (read-only).
+    ///
+    /// Prints a create/update/noop/would-delete report. Deletes are never
+    /// applied by `apply`; they are printed here as warnings only.
+    Plan {
+        /// Path to the bundle YAML file.
+        #[arg(short = 'f', long = "file", value_name = "PATH")]
+        file: PathBuf,
+
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// Reconcile a running server toward a catalog-as-code bundle.
+    ///
+    /// Idempotent: re-applying an unchanged bundle is a no-op. Creates and
+    /// updates only — never deletes. Exits non-zero if any resource fails.
+    Apply {
+        /// Path to the bundle YAML file.
+        #[arg(short = 'f', long = "file", value_name = "PATH")]
+        file: PathBuf,
+
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -351,6 +388,16 @@ fn main() -> ExitCode {
         Command::Role(command) => run_async(run_role(command)),
         Command::Grant(command) => run_async(run_grant(command)),
         Command::Events(command) => run_async(run_events(command)),
+        Command::Plan {
+            file,
+            server,
+            token,
+        } => run_async(run_plan(file, server, token)),
+        Command::Apply {
+            file,
+            server,
+            token,
+        } => run_async(run_apply(file, server, token)),
     };
 
     match result {
@@ -360,6 +407,46 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `meridian plan -f bundle.yaml` — diff a bundle against the server.
+async fn run_plan(file: PathBuf, server: String, token: Option<String>) -> Result<(), CliError> {
+    let bundle = bundle::load_file(&file).map_err(|e| CliError(e.to_string()))?;
+    let state = bundle::plan::load_server_state(&server, token.as_deref()).await?;
+    let plan = bundle::plan::compute(&bundle, &server, token.as_deref(), &state)
+        .await
+        .map_err(|e| CliError(e.to_string()))?;
+    print!("{}", bundle::plan::render(&plan));
+    Ok(())
+}
+
+/// `meridian apply -f bundle.yaml` — reconcile the server toward a bundle.
+async fn run_apply(file: PathBuf, server: String, token: Option<String>) -> Result<(), CliError> {
+    let bundle = bundle::load_file(&file).map_err(|e| CliError(e.to_string()))?;
+
+    // Compute a plan first so we can surface the same would-delete /
+    // would-update warnings apply refuses to act on.
+    let state = bundle::plan::load_server_state(&server, token.as_deref()).await?;
+    let plan = bundle::plan::compute(&bundle, &server, token.as_deref(), &state)
+        .await
+        .map_err(|e| CliError(e.to_string()))?;
+
+    let mut report = bundle::apply::apply(&bundle, &server, token.as_deref())
+        .await
+        .map_err(|e| CliError(e.to_string()))?;
+    report
+        .outcomes
+        .extend(bundle::apply::warnings_from_plan(&plan));
+
+    print!("{}", report.render());
+
+    if report.failures() > 0 {
+        return Err(CliError(format!(
+            "{} resource(s) failed to apply",
+            report.failures()
+        )));
+    }
+    Ok(())
 }
 
 /// Runs an admin-command future on a fresh current-thread runtime.
@@ -396,13 +483,14 @@ async fn run_warehouse(command: WarehouseCommand) -> Result<(), CliError> {
             server,
         } => {
             let options = parse_pairs(&storage_options)?;
-            let created = client::warehouse_create(&server, &name, &storage_root, &options).await?;
+            let created =
+                client::warehouse_create(&server, None, &name, &storage_root, &options).await?;
             let id = created.get("id").and_then(Value::as_str).unwrap_or("?");
             println!("created warehouse {name} (id {id})");
             Ok(())
         }
         WarehouseCommand::List { server } => {
-            let body = client::warehouse_list(&server).await?;
+            let body = client::warehouse_list(&server, None).await?;
             let warehouses = body
                 .get("warehouses")
                 .and_then(Value::as_array)
@@ -445,7 +533,7 @@ async fn run_namespace(command: NamespaceCommand) -> Result<(), CliError> {
         } => {
             let levels = parse_namespace_arg(&namespace)?;
             let props = parse_pairs(&properties)?;
-            client::namespace_create(&server, &warehouse, &levels, &props).await?;
+            client::namespace_create(&server, None, &warehouse, &levels, &props).await?;
             println!("created namespace {namespace} in warehouse {warehouse}");
             Ok(())
         }
@@ -456,7 +544,7 @@ async fn run_namespace(command: NamespaceCommand) -> Result<(), CliError> {
         } => {
             let parent_levels = parent.as_deref().map(parse_namespace_arg).transpose()?;
             let body =
-                client::namespace_list(&server, &warehouse, parent_levels.as_deref()).await?;
+                client::namespace_list(&server, None, &warehouse, parent_levels.as_deref()).await?;
             let namespaces = body
                 .get("namespaces")
                 .and_then(Value::as_array)

@@ -17,7 +17,9 @@ meridian-common = { workspace = true }
 meridian-server = { workspace = true }
 meridian-store = { workspace = true }
 reqwest = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 

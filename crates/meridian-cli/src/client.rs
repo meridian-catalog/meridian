@@ -83,6 +83,7 @@ async fn check(response: reqwest::Response) -> Result<reqwest::Response, CliErro
 /// `POST /api/v2/warehouses`.
 pub(crate) async fn warehouse_create(
     server: &str,
+    token: Option<&str>,
     name: &str,
     storage_root: &str,
     storage_options: &[(String, String)],
@@ -91,30 +92,28 @@ pub(crate) async fn warehouse_create(
         .iter()
         .map(|(k, v)| (k.clone(), Value::String(v.clone())))
         .collect();
-    let response = http_client()?
+    let request = http_client()?
         .post(format!("{}/api/v2/warehouses", base(server)))
         .json(&json!({
             "name": name,
             "storage_root": storage_root,
             "storage_options": options,
-        }))
-        .send()
-        .await?;
+        }));
+    let response = with_token(request, token).send().await?;
     Ok(check(response).await?.json().await?)
 }
 
 /// `GET /api/v2/warehouses`.
-pub(crate) async fn warehouse_list(server: &str) -> Result<Value, CliError> {
-    let response = http_client()?
-        .get(format!("{}/api/v2/warehouses", base(server)))
-        .send()
-        .await?;
+pub(crate) async fn warehouse_list(server: &str, token: Option<&str>) -> Result<Value, CliError> {
+    let request = http_client()?.get(format!("{}/api/v2/warehouses", base(server)));
+    let response = with_token(request, token).send().await?;
     Ok(check(response).await?.json().await?)
 }
 
 /// `POST /v1/{prefix}/namespaces`.
 pub(crate) async fn namespace_create(
     server: &str,
+    token: Option<&str>,
     warehouse: &str,
     levels: &[String],
     properties: &[(String, String)],
@@ -123,17 +122,17 @@ pub(crate) async fn namespace_create(
         .iter()
         .map(|(k, v)| (k.clone(), Value::String(v.clone())))
         .collect();
-    let response = http_client()?
+    let request = http_client()?
         .post(format!("{}/v1/{warehouse}/namespaces", base(server)))
-        .json(&json!({ "namespace": levels, "properties": props }))
-        .send()
-        .await?;
+        .json(&json!({ "namespace": levels, "properties": props }));
+    let response = with_token(request, token).send().await?;
     Ok(check(response).await?.json().await?)
 }
 
 /// `GET /v1/{prefix}/namespaces[?parent=...]`.
 pub(crate) async fn namespace_list(
     server: &str,
+    token: Option<&str>,
     warehouse: &str,
     parent: Option<&[String]>,
 ) -> Result<Value, CliError> {
@@ -142,7 +141,7 @@ pub(crate) async fn namespace_list(
         let encoded: String = parent.join(&UNIT_SEPARATOR.to_string());
         request = request.query(&[("parent", encoded)]);
     }
-    let response = request.send().await?;
+    let response = with_token(request, token).send().await?;
     Ok(check(response).await?.json().await?)
 }
 
@@ -247,6 +246,75 @@ pub(crate) async fn grant_add(
 /// `GET /api/v2/grants`.
 pub(crate) async fn grant_list(server: &str, token: Option<&str>) -> Result<Value, CliError> {
     let request = http_client()?.get(format!("{}/api/v2/grants", base(server)));
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
+/// `GET /v1/{prefix}/namespaces/{namespace}` — load one namespace's
+/// properties. Returns `Ok(None)` on 404 so callers can treat "absent" as a
+/// normal planning outcome rather than an error.
+pub(crate) async fn namespace_load(
+    server: &str,
+    token: Option<&str>,
+    warehouse: &str,
+    levels: &[String],
+) -> Result<Option<Value>, CliError> {
+    let ns = encode_namespace(levels);
+    let request = http_client()?.get(format!("{}/v1/{warehouse}/namespaces/{ns}", base(server)));
+    let response = with_token(request, token).send().await?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    Ok(Some(check(response).await?.json().await?))
+}
+
+/// `POST /v1/{prefix}/namespaces/{namespace}/properties` — set and/or remove
+/// namespace properties atomically.
+pub(crate) async fn namespace_update_properties(
+    server: &str,
+    token: Option<&str>,
+    warehouse: &str,
+    levels: &[String],
+    updates: &[(String, String)],
+    removals: &[String],
+) -> Result<Value, CliError> {
+    let updates_map: serde_json::Map<String, Value> = updates
+        .iter()
+        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+        .collect();
+    let ns = encode_namespace(levels);
+    let request = http_client()?
+        .post(format!(
+            "{}/v1/{warehouse}/namespaces/{ns}/properties",
+            base(server)
+        ))
+        .json(&json!({ "updates": updates_map, "removals": removals }));
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
+/// `GET /api/v2/webhooks`.
+pub(crate) async fn webhook_list(server: &str, token: Option<&str>) -> Result<Value, CliError> {
+    let request = http_client()?.get(format!("{}/api/v2/webhooks", base(server)));
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
+/// `POST /api/v2/webhooks`.
+pub(crate) async fn webhook_create(
+    server: &str,
+    token: Option<&str>,
+    url: &str,
+    event_types: &[String],
+    secret: &str,
+) -> Result<Value, CliError> {
+    let request = http_client()?
+        .post(format!("{}/api/v2/webhooks", base(server)))
+        .json(&json!({
+            "url": url,
+            "event_types": event_types,
+            "secret": secret,
+        }));
     let response = with_token(request, token).send().await?;
     Ok(check(response).await?.json().await?)
 }
