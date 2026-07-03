@@ -99,19 +99,27 @@ const STORAGE_CONFIG_DENYLIST: &[&str] = &["access-key-id", "secret-access-key",
 /// | `region`     | `client.region`, `s3.region`     |
 /// | `path-style` | `s3.path-style-access`           |
 ///
+/// When `endpoint.external` is set on the warehouse it wins over `endpoint`
+/// for `s3.endpoint`: the server keeps talking to storage via the internal
+/// endpoint while every client-facing config advertises the external one
+/// (containerized engines reach `MinIO` on a different address than the
+/// server — the documented `host.docker.internal` situation).
+///
 /// Everything else is either credential material (denylisted above) or a
 /// server-side concern (`retry.*`, `anonymous`) with no client property,
 /// and is not forwarded. Filesystem-rooted warehouses carry none of these
 /// options, so their `config` stays empty.
 pub(crate) fn storage_client_config(warehouse: &WarehouseRecord) -> BTreeMap<String, String> {
     let mut config = BTreeMap::new();
+    let external = warehouse.storage_config.0.get("endpoint.external");
     for (key, value) in &warehouse.storage_config.0 {
         if STORAGE_CONFIG_DENYLIST.contains(&key.as_str()) {
             continue;
         }
         match key.as_str() {
-            "endpoint" => {
-                config.insert("s3.endpoint".to_owned(), value.clone());
+            "endpoint" | "endpoint.external" => {
+                let advertised = external.unwrap_or(value);
+                config.insert("s3.endpoint".to_owned(), advertised.clone());
             }
             "region" => {
                 config.insert("client.region".to_owned(), value.clone());

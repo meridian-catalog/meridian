@@ -7,15 +7,18 @@
 
 pub mod audit;
 pub mod commit;
+pub mod consumer;
 pub mod namespace;
 pub mod outbox;
 pub mod pool;
 pub mod principal;
 pub mod rbac;
+pub mod search;
 pub mod table;
 pub mod tenancy;
 pub mod view;
 pub mod warehouse;
+pub mod webhook;
 
 pub use pool::{connect, health_check};
 

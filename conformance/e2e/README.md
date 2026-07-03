@@ -54,6 +54,12 @@ options (`s3.endpoint`, `s3.region`/`client.region`,
 `s3.path-style-access`) in `LoadTableResult.config` /
 `LoadViewResult.config`
 (`test_pyiceberg_minio.py::test_server_vends_non_secret_storage_config`
-verifies this). Credentials are never vended — the S3 tests still
-configure `s3.access-key-id`/`s3.secret-access-key` client-side, and the
-same test asserts the server never leaks them.
+verifies this). Credentials are never passed through as config — the
+plain S3 tests still configure
+`s3.access-key-id`/`s3.secret-access-key` client-side, and the same test
+asserts the server never leaks them. Credential **vending** is separate
+and opt-in: `test_vended_credentials.py` runs a warehouse with
+`vending = "sts"` against MinIO's STS endpoint, and its pyiceberg client
+holds zero S3 configuration — scoped, short-lived session credentials
+arrive from the catalog, and a boto3 check proves they cannot cross into
+a sibling table's prefix.

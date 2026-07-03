@@ -74,8 +74,15 @@ vended config **over** catalog-level client properties, so a client-side
 `s3.endpoint` override does not stick. The container therefore runs with
 `--network host`, which makes `localhost:9000` inside the container
 reach MinIO. The catalog URI is not vended and points at
-`host.docker.internal:8181`. Splitting internal vs. external endpoint
-vending is a known M2 item.
+`host.docker.internal:8181`.
+
+Internal vs. external endpoint advertisement now exists: setting the
+`endpoint.external` storage option on the warehouse (e.g.
+`http://host.docker.internal:9000`) makes every client-facing config
+advertise that address while the server keeps using `endpoint`
+internally — see [Storage config passthrough](../../../docs/api-status.md#storage-config-passthrough).
+This smoke still uses host networking (predates the option); switching it
+over is a cleanup TODO.
 
 ## Resolved issues
 

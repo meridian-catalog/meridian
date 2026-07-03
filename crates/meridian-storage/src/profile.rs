@@ -138,7 +138,12 @@ pub(crate) enum ProfileRoot {
 /// | `retry.max-delay-ms` | all | Backoff ceiling (default 10000) |
 ///
 /// Unknown keys are rejected — a typo in a durability-critical option must
-/// fail loudly, not be silently ignored.
+/// fail loudly, not be silently ignored. The exception is the catalog-layer
+/// keys (`vending`, `vending.*`, `endpoint.external`): one warehouse options
+/// map carries both storage-connection and catalog concerns, so those keys
+/// are accepted here and ignored — they never affect how the *server* talks
+/// to storage. They are parsed and validated by `meridian-vending` and the
+/// server's warehouse API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageProfile {
     pub(crate) root: ProfileRoot,
@@ -294,9 +299,19 @@ const COMMON_OPTION_KEYS: &[&str] = &[
     "retry.max-delay-ms",
 ];
 
+/// Keys owned by the catalog layer (credential vending, external endpoint
+/// advertisement): accepted in the shared options map, ignored by storage
+/// connection logic (see the [`StorageProfile`] docs).
+fn is_catalog_option(key: &str) -> bool {
+    key == "vending" || key.starts_with("vending.") || key == "endpoint.external"
+}
+
 fn parse_s3_options(options: &BTreeMap<String, String>) -> StorageResult<S3Options> {
     for key in options.keys() {
-        if !S3_OPTION_KEYS.contains(&key.as_str()) && !COMMON_OPTION_KEYS.contains(&key.as_str()) {
+        if !S3_OPTION_KEYS.contains(&key.as_str())
+            && !COMMON_OPTION_KEYS.contains(&key.as_str())
+            && !is_catalog_option(key)
+        {
             return Err(StorageError::Config(format!(
                 "unknown storage option {key:?} (supported: {S3_OPTION_KEYS:?} and {COMMON_OPTION_KEYS:?})"
             )));
@@ -315,6 +330,9 @@ fn parse_s3_options(options: &BTreeMap<String, String>) -> StorageResult<S3Optio
 
 fn reject_s3_only_options(options: &BTreeMap<String, String>) -> StorageResult<()> {
     for key in options.keys() {
+        if is_catalog_option(key) {
+            continue;
+        }
         if S3_OPTION_KEYS.contains(&key.as_str()) {
             return Err(StorageError::Config(format!(
                 "option {key:?} does not apply to filesystem storage"
@@ -429,6 +447,29 @@ mod tests {
     fn rejects_unknown_option_key() {
         let err = StorageProfile::parse("s3://b/p", &opts(&[("regoin", "us-east-1")]));
         assert!(matches!(err, Err(StorageError::Config(_))));
+    }
+
+    #[test]
+    fn accepts_and_ignores_catalog_layer_options() {
+        // Same parse result with or without the catalog keys, on both roots.
+        let catalog = opts(&[
+            ("vending", "sts"),
+            ("vending.role-arn", "arn:minio:iam:::role/x"),
+            ("endpoint.external", "http://host.docker.internal:9000"),
+        ]);
+        assert_eq!(
+            StorageProfile::parse("s3://b/p", &catalog).expect("s3 parse"),
+            StorageProfile::parse("s3://b/p", &BTreeMap::new()).expect("s3 parse"),
+        );
+        assert_eq!(
+            StorageProfile::parse("/tmp/wh", &catalog).expect("fs parse"),
+            StorageProfile::parse("/tmp/wh", &BTreeMap::new()).expect("fs parse"),
+        );
+        // A typo'd vending key is still caught by the strict check.
+        assert!(matches!(
+            StorageProfile::parse("s3://b/p", &opts(&[("vendign", "sts")])),
+            Err(StorageError::Config(_))
+        ));
     }
 
     #[test]

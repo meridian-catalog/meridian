@@ -35,6 +35,44 @@ pub struct AppConfig {
     pub telemetry: TelemetryConfig,
     /// Authentication settings.
     pub auth: AuthConfig,
+    /// Event delivery settings (outbox relay, webhooks).
+    pub events: EventsConfig,
+}
+
+/// Event delivery settings (`[events]`): the outbox relay and the webhook
+/// dispatcher, both background tasks inside `meridian serve`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct EventsConfig {
+    /// Maximum outbox rows published per relay iteration. Bounded batches
+    /// keep a large first-boot backlog from turning into one giant
+    /// transaction; the relay loops without sleeping while full batches
+    /// keep coming.
+    pub relay_batch_size: i64,
+    /// Relay poll interval in milliseconds once the backlog is drained.
+    pub relay_poll_ms: u64,
+    /// Webhook dispatcher poll interval in milliseconds.
+    pub webhook_poll_ms: u64,
+    /// Per-request timeout for webhook deliveries, in seconds.
+    pub webhook_timeout_secs: u64,
+    /// Delivery attempts before a webhook delivery is dead-lettered.
+    pub webhook_max_attempts: i32,
+    /// Base delay for webhook retry backoff, in seconds. Attempt `n`
+    /// retries after `base * 2^(n-1)`, capped at 15 minutes.
+    pub webhook_retry_base_secs: u64,
+}
+
+impl Default for EventsConfig {
+    fn default() -> Self {
+        Self {
+            relay_batch_size: 500,
+            relay_poll_ms: 1_000,
+            webhook_poll_ms: 1_000,
+            webhook_timeout_secs: 10,
+            webhook_max_attempts: 10,
+            webhook_retry_base_secs: 10,
+        }
+    }
 }
 
 /// Authentication mode.

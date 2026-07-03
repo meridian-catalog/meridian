@@ -33,10 +33,12 @@ enum Command {
         /// Run every component in this one process.
         ///
         /// Accepted for forward compatibility with the documented
-        /// single-binary topology. TODO(M3): once background workers exist,
-        /// plain `serve` will run only the API server and this flag will
-        /// additionally embed the workers. Today there is nothing to split,
-        /// so both forms behave identically.
+        /// single-binary topology. `serve` already embeds the event
+        /// workers (outbox relay, webhook dispatcher) alongside the API
+        /// server. TODO(M3): once workers can be split out into their own
+        /// processes, plain `serve` will run only the API server and this
+        /// flag will opt back into embedding; today both forms behave
+        /// identically.
         #[arg(long)]
         all_in_one: bool,
 
@@ -57,6 +59,33 @@ enum Command {
     #[command(subcommand)]
     Table(TableCommand),
 
+    /// Search tables, views, and namespaces on a running server.
+    Search {
+        /// The query text (name, column, comment, ... fragments).
+        #[arg(value_name = "QUERY")]
+        query: String,
+
+        /// Restrict to one warehouse by name.
+        #[arg(long)]
+        warehouse: Option<String>,
+
+        /// Comma-separated asset types to include: table, view, namespace.
+        #[arg(long = "type", value_name = "TYPES")]
+        kinds: Option<String>,
+
+        /// Maximum number of results (1-100).
+        #[arg(long, default_value_t = 20)]
+        limit: i64,
+
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
     /// Manage RBAC roles on a running server.
     #[command(subcommand)]
     Role(RoleCommand),
@@ -64,6 +93,44 @@ enum Command {
     /// Manage RBAC grants on a running server.
     #[command(subcommand)]
     Grant(GrantCommand),
+
+    /// Follow the catalog event feed on a running server.
+    #[command(subcommand)]
+    Events(EventsCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum EventsCommand {
+    /// Print events as `CloudEvents` JSON lines and follow the feed.
+    ///
+    /// Starts at the current end of the feed by default (like `tail -f`);
+    /// use --from-start or --after to replay history. Stop with ctrl-c.
+    Tail {
+        /// Start from the beginning of the feed instead of the end.
+        #[arg(long, conflicts_with = "after")]
+        from_start: bool,
+
+        /// Start after this cursor (an event id from a previous run).
+        #[arg(long, value_name = "CURSOR")]
+        after: Option<String>,
+
+        /// Only these event types, comma-separated
+        /// (e.g. com.meridian.table.committed,com.meridian.table.created).
+        #[arg(long, value_name = "TYPES")]
+        types: Option<String>,
+
+        /// Poll interval in seconds while waiting for new events.
+        #[arg(long, default_value_t = 2, value_name = "SECONDS")]
+        interval: u64,
+
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -273,8 +340,17 @@ fn main() -> ExitCode {
         Command::Warehouse(command) => run_async(run_warehouse(command)),
         Command::Namespace(command) => run_async(run_namespace(command)),
         Command::Table(command) => run_async(run_table(command)),
+        Command::Search {
+            query,
+            warehouse,
+            kinds,
+            limit,
+            server,
+            token,
+        } => run_async(run_search(query, warehouse, kinds, limit, server, token)),
         Command::Role(command) => run_async(run_role(command)),
         Command::Grant(command) => run_async(run_grant(command)),
+        Command::Events(command) => run_async(run_events(command)),
     };
 
     match result {
@@ -498,6 +574,67 @@ async fn run_table(command: TableCommand) -> Result<(), CliError> {
     }
 }
 
+/// `meridian search <QUERY>` — ranked search over tables/views/namespaces.
+async fn run_search(
+    query: String,
+    warehouse: Option<String>,
+    kinds: Option<String>,
+    limit: i64,
+    server: String,
+    token: Option<String>,
+) -> Result<(), CliError> {
+    let body = client::search(
+        &server,
+        token.as_deref(),
+        &query,
+        warehouse.as_deref(),
+        kinds.as_deref(),
+        limit,
+    )
+    .await?;
+    let results = body
+        .get("results")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CliError("malformed response: missing results".to_owned()))?;
+    let rows: Vec<Vec<String>> = results
+        .iter()
+        .map(|hit| {
+            let kind = hit.get("type").and_then(Value::as_str).unwrap_or("?");
+            let warehouse = hit.get("warehouse").and_then(Value::as_str).unwrap_or("?");
+            let namespace =
+                hit.get("namespace")
+                    .and_then(Value::as_array)
+                    .map_or_else(String::new, |levels| {
+                        levels
+                            .iter()
+                            .map(|l| l.as_str().unwrap_or("?"))
+                            .collect::<Vec<_>>()
+                            .join(".")
+                    });
+            let name = hit.get("name").and_then(Value::as_str).unwrap_or("?");
+            let ident = if kind == "namespace" || namespace.is_empty() {
+                format!("{warehouse}.{namespace}")
+            } else {
+                format!("{warehouse}.{namespace}.{name}")
+            };
+            let snippet = hit
+                .get("snippet")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            vec![kind.to_owned(), ident, snippet]
+        })
+        .collect();
+    print!(
+        "{}",
+        client::render_table(&["TYPE", "IDENTIFIER", "MATCH"], &rows)
+    );
+    if let Some(next) = body.get("next_page_token").and_then(Value::as_str) {
+        println!("(more results available; refine the query or raise --limit; token: {next})");
+    }
+    Ok(())
+}
+
 async fn run_role(command: RoleCommand) -> Result<(), CliError> {
     match command {
         RoleCommand::List { server, token } => {
@@ -638,6 +775,50 @@ fn render_scalar(value: &Value) -> String {
         Value::String(s) => s.clone(),
         Value::Null => "-".to_owned(),
         other => other.to_string(),
+    }
+}
+
+async fn run_events(command: EventsCommand) -> Result<(), CliError> {
+    match command {
+        EventsCommand::Tail {
+            from_start,
+            after,
+            types,
+            interval,
+            server,
+            token,
+        } => {
+            // Resolution order: explicit cursor > --from-start (empty
+            // cursor = beginning) > the "latest" sentinel (server resolves
+            // the current end of the feed).
+            let mut cursor = match after {
+                Some(after) => after,
+                None if from_start => String::new(),
+                None => "latest".to_owned(),
+            };
+            let poll = std::time::Duration::from_secs(interval.max(1));
+            loop {
+                let body =
+                    client::events_list(&server, token.as_deref(), &cursor, types.as_deref(), 500)
+                        .await?;
+                let events = body
+                    .get("events")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| CliError("malformed response: missing events".to_owned()))?;
+                for event in events {
+                    // One compact CloudEvents JSON object per line.
+                    println!("{event}");
+                }
+                cursor = body
+                    .get("next_cursor")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| CliError("malformed response: missing next_cursor".to_owned()))?
+                    .to_owned();
+                if events.is_empty() {
+                    tokio::time::sleep(poll).await;
+                }
+            }
+        }
     }
 }
 

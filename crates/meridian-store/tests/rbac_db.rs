@@ -93,6 +93,7 @@ async fn make_table(
             metadata_location: "s3://test-bucket/rbac/fake/metadata/00000-x.metadata.json",
             format_version: 2,
             properties: &BTreeMap::new(),
+            schema_text: None,
             origin: "create",
         },
         ACTOR,

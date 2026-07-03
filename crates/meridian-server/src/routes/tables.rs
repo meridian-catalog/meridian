@@ -93,6 +93,10 @@ use crate::routes::grants::{namespace_scope_chain, require};
 use crate::routes::namespaces::{
     decode_namespace_param, next_page_token, resolve_pagination, resolve_warehouse,
 };
+use crate::routes::vending::{
+    RequestedDelegation, VendContext, requested_delegation, storage_credential_json,
+    vend_access_mode, vend_for_table,
+};
 
 /// Bounded rebase-retry budget for the compare-and-set loop (design doc §6).
 /// Conflicts are only reachable through a concurrent commit between our
@@ -218,8 +222,10 @@ fn metadata_to_value(metadata: &TableMetadata) -> Result<Value, ApiError> {
 
 /// The `LoadTableResult` body. `config` carries the warehouse's non-secret
 /// storage options mapped to Iceberg client property names (see
-/// [`super::views::storage_client_config`] — shared with `LoadViewResult`;
-/// credentials are never forwarded, that is the M2 vending milestone).
+/// [`super::views::storage_client_config`] — shared with `LoadViewResult`).
+/// Credentials only ever join the response through [`attach_vended`]: an
+/// explicit client request (`X-Iceberg-Access-Delegation`) against a
+/// warehouse that opted into vending (see [`super::vending`]).
 fn load_table_result(
     warehouse: &WarehouseRecord,
     metadata_location: Option<&str>,
@@ -230,6 +236,18 @@ fn load_table_result(
         "metadata": metadata_to_value(metadata)?,
         "config": super::views::storage_client_config(warehouse),
     }))
+}
+
+/// Merges vended credentials into a `LoadTableResult`: the client
+/// properties join `config` (what engines read today) and the spec's
+/// `storage-credentials` field mirrors them (what newer clients prefer).
+fn attach_vended(body: &mut Value, vended: &meridian_vending::VendedCredentials) {
+    if let Some(config) = body.get_mut("config").and_then(Value::as_object_mut) {
+        for (key, value) in &vended.config {
+            config.insert(key.clone(), Value::String(value.clone()));
+        }
+    }
+    body["storage-credentials"] = json!([storage_credential_json(vended)]);
 }
 
 // -- ETags -------------------------------------------------------------------
@@ -655,6 +673,11 @@ fn derived_state(metadata: &TableMetadata) -> DerivedTableState {
             "current_snapshot_id": current,
         }),
         snapshots,
+        // Column names + docs of the current schema, indexed for full-text
+        // search in the same write-through transaction (migration 0010).
+        schema_text: metadata
+            .current_schema()
+            .map(meridian_store::search::schema_search_text),
     }
 }
 
@@ -690,6 +713,7 @@ async fn materialize_new_table(
             metadata_location,
             format_version: derived.format_version,
             properties: &derived.properties,
+            schema_text: derived.schema_text.as_deref(),
             origin,
         },
         principal,
@@ -764,8 +788,10 @@ pub async fn create_table(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Path((prefix, raw_namespace)): Path<(String, String)>,
+    headers: HeaderMap,
     Json(request): Json<CreateTableRequest>,
 ) -> Result<Response, ApiError> {
+    let delegation = requested_delegation(&headers)?;
     let ctx = resolve_namespace(&state, &prefix, &raw_namespace).await?;
     let chain = namespace_scope_chain(&state.pool, &ctx.warehouse.id, &ctx.levels).await?;
     require(
@@ -792,7 +818,10 @@ pub async fn create_table(
     if request.stage_create {
         // Nothing durable happens here (see module docs): the metadata is
         // returned for the client to build on, and the create transaction
-        // commits through the commit endpoint with assert-create.
+        // commits through the commit endpoint with assert-create. No table
+        // row exists yet, so nothing is vended either (a staged create has
+        // no audit resource); the client gets credentials when it loads
+        // the committed table.
         let body = load_table_result(&ctx.warehouse, None, &metadata)?;
         return Ok((StatusCode::OK, Json(body)).into_response());
     }
@@ -813,7 +842,27 @@ pub async fn create_table(
     .await
     .map_err(|e| e.into_api(ApiError::already_exists))?;
 
-    let body = load_table_result(&ctx.warehouse, Some(&location), &metadata)?;
+    let mut body = load_table_result(&ctx.warehouse, Some(&location), &metadata)?;
+    if delegation == RequestedDelegation::VendedCredentials {
+        // The caller just created the table and is about to write its
+        // first data files: read-write, backed by the CREATE_TABLE grant
+        // that got it this far.
+        let vended = vend_for_table(
+            &state,
+            &principal,
+            &VendContext {
+                warehouse: &ctx.warehouse,
+                table_id: &record.id,
+                table_ident: &display_ident(&ctx.levels, &request.name),
+                table_location: &metadata.location,
+                access: meridian_vending::AccessMode::ReadWrite,
+            },
+        )
+        .await?;
+        if let Some(vended) = vended {
+            attach_vended(&mut body, &vended);
+        }
+    }
     Ok(json_with_etag(
         StatusCode::OK,
         body,
@@ -850,13 +899,14 @@ pub async fn load_table(
     Query(query): Query<LoadTableQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let delegation = requested_delegation(&headers)?;
     let (warehouse, levels, record) = resolve_table(&state, &prefix, &raw_namespace, &name).await?;
     let chain = namespace_scope_chain(&state.pool, &warehouse.id, &levels).await?;
     require(
         &state.pool,
         &principal,
         Privilege::Read,
-        &SecurableScope::table(&warehouse.id, chain, Some(&record.id)),
+        &SecurableScope::table(&warehouse.id, chain.clone(), Some(&record.id)),
     )
     .await?;
     let refs_only = match query.snapshots.as_deref() {
@@ -891,7 +941,34 @@ pub async fn load_table(
         retain_referenced_snapshots(&mut metadata);
     }
 
-    let body = load_table_result(&warehouse, Some(&metadata_location), &metadata)?;
+    let mut body = load_table_result(&warehouse, Some(&metadata_location), &metadata)?;
+    if delegation == RequestedDelegation::VendedCredentials {
+        // Access follows the caller's grants: WRITE/COMMIT holders get
+        // read-write credentials, READ-only holders read-only. A warehouse
+        // without vending enabled ignores the header (pyiceberg sends it
+        // by default), keeping plain config passthrough intact.
+        let access = vend_access_mode(
+            &state,
+            &principal,
+            &SecurableScope::table(&warehouse.id, chain, Some(&record.id)),
+        )
+        .await?;
+        let vended = vend_for_table(
+            &state,
+            &principal,
+            &VendContext {
+                warehouse: &warehouse,
+                table_id: &record.id,
+                table_ident: &display_ident(&levels, &name),
+                table_location: &metadata.location,
+                access,
+            },
+        )
+        .await?;
+        if let Some(vended) = vended {
+            attach_vended(&mut body, &vended);
+        }
+    }
     Ok(json_with_etag(StatusCode::OK, body, &etag))
 }
 
@@ -1128,6 +1205,7 @@ pub async fn register_table(
             metadata_location: &request.metadata_location,
             format_version: derived.format_version,
             properties: &derived.properties,
+            schema_text: derived.schema_text.as_deref(),
             origin: "register",
         },
         &principal.audit_string(),

@@ -1,11 +1,13 @@
 """pyiceberg full lifecycle against Meridian with an s3:// (MinIO) warehouse.
 
 Identical scenario to test_pyiceberg_fs.py, on object storage. The server
-now vends the warehouse's non-secret storage options (endpoint, region,
+vends the warehouse's non-secret storage options (endpoint, region,
 path-style) in LoadTableResult `config` — verified by
-test_server_vends_non_secret_storage_config below. Credentials are still
-configured client-side: Meridian never vends credentials (that is the
-credential-vending milestone, not config passthrough).
+test_server_vends_non_secret_storage_config below. Credentials are
+configured client-side here because this warehouse does not opt into
+credential vending — so the server must never emit them (asserted below).
+The vending path (warehouse with `vending = "sts"`, client with zero S3
+config) is covered by test_vended_credentials.py.
 """
 
 from types import SimpleNamespace

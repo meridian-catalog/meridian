@@ -47,9 +47,16 @@ fn with_token(request: reqwest::RequestBuilder, token: Option<&str>) -> reqwest:
     }
 }
 
-/// Normalizes the server base URL (strips a trailing slash).
-fn base(server: &str) -> &str {
-    server.trim_end_matches('/')
+/// Normalizes the server base URL: strips a trailing slash and defaults the
+/// scheme to `http://` when none is given, so `--server localhost:8181`
+/// works instead of failing with an opaque URL-builder error.
+fn base(server: &str) -> String {
+    let trimmed = server.trim_end_matches('/');
+    if trimmed.contains("://") {
+        trimmed.to_owned()
+    } else {
+        format!("http://{trimmed}")
+    }
 }
 
 /// Turns a non-success response into a readable error, using the server's
@@ -179,6 +186,30 @@ fn encode_namespace(levels: &[String]) -> String {
     levels.join("%1F")
 }
 
+/// `GET /api/v2/search`.
+pub(crate) async fn search(
+    server: &str,
+    token: Option<&str>,
+    query: &str,
+    warehouse: Option<&str>,
+    kinds: Option<&str>,
+    limit: i64,
+) -> Result<Value, CliError> {
+    let mut params: Vec<(&str, String)> =
+        vec![("q", query.to_owned()), ("limit", limit.to_string())];
+    if let Some(warehouse) = warehouse {
+        params.push(("warehouse", warehouse.to_owned()));
+    }
+    if let Some(kinds) = kinds {
+        params.push(("type", kinds.to_owned()));
+    }
+    let request = http_client()?
+        .get(format!("{}/api/v2/search", base(server)))
+        .query(&params);
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
 /// `GET /api/v2/roles`.
 pub(crate) async fn role_list(server: &str, token: Option<&str>) -> Result<Value, CliError> {
     let request = http_client()?.get(format!("{}/api/v2/roles", base(server)));
@@ -216,6 +247,28 @@ pub(crate) async fn grant_add(
 /// `GET /api/v2/grants`.
 pub(crate) async fn grant_list(server: &str, token: Option<&str>) -> Result<Value, CliError> {
     let request = http_client()?.get(format!("{}/api/v2/grants", base(server)));
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
+/// `GET /api/v2/events` — one page of the published event feed.
+pub(crate) async fn events_list(
+    server: &str,
+    token: Option<&str>,
+    after: &str,
+    types: Option<&str>,
+    limit: i64,
+) -> Result<Value, CliError> {
+    let mut query: Vec<(&str, String)> = vec![("limit", limit.to_string())];
+    if !after.is_empty() {
+        query.push(("after", after.to_owned()));
+    }
+    if let Some(types) = types {
+        query.push(("types", types.to_owned()));
+    }
+    let request = http_client()?
+        .get(format!("{}/api/v2/events", base(server)))
+        .query(&query);
     let response = with_token(request, token).send().await?;
     Ok(check(response).await?.json().await?)
 }

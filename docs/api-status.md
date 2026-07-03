@@ -73,8 +73,8 @@ piece is missing · **Not yet** — returns 404/405.
 | Operation | Endpoint | Status | Notes |
 |---|---|---|---|
 | `listTables` | `GET .../namespaces/{ns}/tables` | Implemented | Pagination: see divergence (a). |
-| `createTable` | `POST .../namespaces/{ns}/tables` | Implemented | `stage-create` supported (metadata returned, nothing persisted until the create transaction commits with `assert-create`). `format-version` property selects format 1–3 (default 2). Request field ids are treated as provisional, like the Java reference (`AssignFreshIds`): the server assigns fresh 1-based ids (nested types included) and remaps `identifier-field-ids` and partition-spec/sort-order source ids; a requested partition spec becomes the table's only spec, `spec-id: 0` (divergence (d), resolved). Flink's 0-based connector ids, which used to be rejected, are covered by the [Flink smoke](../conformance/engines/flink/README.md). No credential vending: the `X-Iceberg-Access-Delegation` header is ignored; `config` carries the warehouse's non-secret storage options only (see [Storage config passthrough](#storage-config-passthrough)). Name collisions with views: see divergence (g). |
-| `loadTable` | `GET .../tables/{table}` | Implemented | `snapshots=all\|refs`; strong `ETag` and `If-None-Match` → 304 (see [ETags](#etags)). No credential vending; `config` carries non-secret storage options only (see [Storage config passthrough](#storage-config-passthrough)). |
+| `createTable` | `POST .../namespaces/{ns}/tables` | Implemented | `stage-create` supported (metadata returned, nothing persisted until the create transaction commits with `assert-create`). `format-version` property selects format 1–3 (default 2). Request field ids are treated as provisional, like the Java reference (`AssignFreshIds`): the server assigns fresh 1-based ids (nested types included) and remaps `identifier-field-ids` and partition-spec/sort-order source ids; a requested partition spec becomes the table's only spec, `spec-id: 0` (divergence (d), resolved). Flink's 0-based connector ids, which used to be rejected, are covered by the [Flink smoke](../conformance/engines/flink/README.md). `X-Iceberg-Access-Delegation: vended-credentials` vends read-write credentials on warehouses that opted in (see [Credential vending](#credential-vending)); otherwise `config` carries the warehouse's non-secret storage options only (see [Storage config passthrough](#storage-config-passthrough)). `stage-create` responses never vend (no table exists yet). Name collisions with views: see divergence (g). |
+| `loadTable` | `GET .../tables/{table}` | Implemented | `snapshots=all\|refs`; strong `ETag` and `If-None-Match` → 304 (see [ETags](#etags)). `X-Iceberg-Access-Delegation: vended-credentials` vends per-table credentials on opted-in warehouses — read-write for `WRITE`/`COMMIT` holders, read-only for `READ`-only holders (see [Credential vending](#credential-vending)); `remote-signing` alone → 400 (not implemented). Otherwise `config` carries non-secret storage options only (see [Storage config passthrough](#storage-config-passthrough)). |
 | `updateTable` (commit) | `POST .../tables/{table}` | Implemented | The single-table commit path: requirements checked against the current metadata, unknown update/requirement types → 400 (as the spec requires), bounded compare-and-swap retry (409 `CommitFailedException` after 3 lost races), `assert-create` finalizes a stage-create transaction. `Idempotency-Key` honored (see [Idempotency keys](#idempotency-keys)). Exercised end-to-end by pyiceberg (appends, schema evolution, two concurrent writers), by Flink's checkpoint-driven streaming commits, and by Spark's merge-on-read row-level operations — `MERGE INTO` and `DELETE FROM` commit position-delete files through this path, and Trino reads the resulting table back exactly (cross-engine, verified) — see the [engine matrix](../conformance/engines/README.md). |
 | `dropTable` | `DELETE .../tables/{table}` | Implemented | `purgeRequested=true` semantics: see divergence (e). |
 | `tableExists` | `HEAD .../tables/{table}` | Implemented | 204 / 404. |
@@ -83,7 +83,7 @@ piece is missing · **Not yet** — returns 404/405.
 | `reportMetrics` | `POST .../tables/{table}/metrics` | Implemented | The report is validated as a JSON object and stored verbatim (it feeds the planned observability layer); 204. |
 | `commitTransaction` | `POST /v1/{prefix}/transactions/commit` | Partial | Atomic multi-table commit: all requirements evaluated before anything is staged, **every** violation reported (not just the first), all pointers move in one database transaction or none do. `Idempotency-Key` honored. **Missing:** `assert-create` (staged creates) inside a transaction is rejected with 400. |
 | `unregisterTable` | `POST .../tables/{table}/unregister` | Not yet | |
-| `loadCredentials` | `GET .../tables/{table}/credentials` | Not yet | No credential vending anywhere in the catalog yet. |
+| `loadCredentials` | `GET .../tables/{table}/credentials` | Implemented | Per-table scoped credentials on warehouses that opted in via the `vending = "sts"` or `"static"` storage option; 400 on warehouses that did not (see [Credential vending](#credential-vending)). RBAC decides read vs read-write; every vend is audited. |
 | `signRequest` | `POST .../tables/{table}/sign` | Not yet | No remote request signing. |
 
 ### Scan planning
@@ -223,14 +223,70 @@ resolve the endpoint and addressing style from the catalog:
 | `region` | `client.region`, `s3.region` |
 | `path-style` | `s3.path-style-access` |
 
+When the warehouse sets `endpoint.external`, that value wins over
+`endpoint` for `s3.endpoint` in **all** client-facing config (table and
+view loads, vended credentials) while the server keeps using `endpoint`
+internally — for containerized engines that reach object storage on a
+different address than the server does (e.g. `host.docker.internal`).
+
 Credential material — `access-key-id`, `secret-access-key`,
-`session-token` — is **never** forwarded (an explicit denylist, verified by
-tests that sweep response bodies for planted credential values). Credential
-delivery is the credential-vending milestone (`loadCredentials`, the
-`X-Iceberg-Access-Delegation` header), not a side effect of config
-passthrough. Server-side options (`retry.*`, `anonymous`) have no client
-property and are not forwarded; filesystem-rooted warehouses have no
-client-facing options, so their `config` is empty.
+`session-token` — is **never** forwarded by passthrough (an explicit
+denylist, verified by tests that sweep response bodies for planted
+credential values). Credential delivery happens only through
+[credential vending](#credential-vending) — an explicit client request
+against a warehouse that explicitly opted in — never as a side effect of
+config passthrough. Server-side options (`retry.*`, `anonymous`,
+`vending*`) have no client property and are not forwarded;
+filesystem-rooted warehouses have no client-facing options, so their
+`config` is empty.
+
+## Credential vending
+
+Per-table, RBAC-scoped storage credentials, delivered through
+`loadCredentials` and the `X-Iceberg-Access-Delegation: vended-credentials`
+header on `createTable`/`loadTable` (design and decisions:
+[docs/design/vending.md](design/vending.md)). Off by default; a warehouse
+opts in through storage options:
+
+```jsonc
+// POST /api/v2/warehouses
+{
+  "name": "prod",
+  "storage_root": "s3://bucket/prefix",
+  "storage_options": {
+    "endpoint": "http://minio:9000",          // internal (server-side)
+    "endpoint.external": "http://host.docker.internal:9000", // advertised
+    "access-key-id": "…", "secret-access-key": "…",
+    "vending": "sts",                          // none | static | sts
+    "vending.role-arn": "arn:…:role/…",        // sts only
+    "vending.duration-secs": "3600"            // sts only, 900–43200
+  }
+}
+```
+
+- **`sts`** — one STS `AssumeRole` per vend with an inline session policy
+  scoped to the table's location prefix (`GetObject` + `ListBucket` under
+  a prefix condition; `PutObject`/`DeleteObject` added for read-write).
+  Verified against MinIO (STS on the S3 endpoint; prefix isolation and
+  TTL covered by integration + e2e tests, including a pyiceberg client
+  configured with only the catalog URI). Standard AWS STS semantics, but
+  **not yet cloud-verified against real AWS**.
+- **`static`** — the warehouse's own keys passed through, unscoped and
+  without expiry, for self-hosted setups with no STS: an explicit,
+  documented trade-off, which is why it is a separate opt-in value.
+- **GCS / Azure** — not implemented; vends fail with a clear
+  "not implemented yet" error (no fake credentials, ever).
+- **Access follows RBAC**: `WRITE`/`COMMIT` on the table → read-write
+  credentials; `READ` only → read-only; neither → 403. In
+  `auth.mode = "disabled"` the anonymous principal vends read-write.
+- **Auditing**: every vend writes an `audit_log` row (`credential.vend`)
+  and an outbox event (`credential.vended`) — principal, table, prefix,
+  access, mode, TTL — in one transaction *before* credentials are
+  returned.
+- Misconfigured vending options are rejected at warehouse create time.
+  `remote-signing` delegation is not implemented (400 when requested
+  alone); the vending header is ignored on warehouses with
+  `vending = "none"` (pyiceberg sends it by default).
 
 ## Idempotency keys
 
@@ -411,3 +467,63 @@ API (`/api/v2/roles`, `/api/v2/grants`, `/api/v2/permissions` — see
 authentication middleware as the IRC surface (see the warning at the top
 about the disabled-by-default posture), and all of them — principal
 listing included — require management access in `oidc` mode.
+
+### Events (`/api/v2/events`, `/api/v2/webhooks`)
+
+Every catalog mutation emits an event (transactional outbox, published by
+a background relay inside `meridian serve`) rendered as CloudEvents 1.0
+JSON. Full design, event-type catalog, ordering/at-least-once guarantees,
+and the webhook signature-verification recipe:
+[docs/design/events.md](design/events.md).
+
+- **Queryable feed**: `GET /api/v2/events?after=<cursor>&types=<t,..>&limit=`
+  — keyset-paginated over published events, cursor = event id,
+  `after=latest` starts at the current end. Gap-free and totally ordered
+  (publication-frontier bounded).
+- **Durable consumers**: `POST /api/v2/events/consumers {name}`,
+  `GET .../consumers/{name}/next`, `POST .../consumers/{name}/commit
+  {cursor}`, `DELETE .../consumers/{name}` — persistent offsets,
+  at-least-once (`next` re-serves until committed; backward commits → 409).
+- **Webhooks**: `POST`/`GET /api/v2/webhooks`, `GET`/`DELETE
+  /api/v2/webhooks/{id}`, `GET /api/v2/webhooks/{id}/deliveries?status=` —
+  HMAC-SHA256-signed CloudEvents deliveries with per-endpoint exponential
+  retry and dead-letter visibility. Secrets are write-only.
+- **Authorization** (`oidc` mode): all events endpoints require management
+  access (admin or any `MANAGE_WAREHOUSE` grant). The feed spans every
+  resource in the workspace, so the existing resource-scoped privileges
+  cannot express "may read events"; a dedicated `READ_EVENTS` privilege is
+  deliberately deferred (documented in the design doc).
+- **CLI**: `meridian events tail [--from-start | --after <cursor>]
+  [--types ...]` follows the feed as JSON lines.
+
+### Search (`GET /api/v2/search`)
+
+Ranked full-text search over tables, views, and namespaces (Postgres FTS;
+no external search engine). CLI: `meridian search <query>`.
+
+- **Query**: `q` (required), `type` (comma-separated `table,view,namespace`),
+  `warehouse` (name; unknown → 404), `namespace` (dot-separated path
+  prefix), `limit` (1–100, default 20), `page_token` (keyset cursor from
+  the previous response).
+- **Matches**: asset name, namespace path, table **column names and docs**
+  (extracted from the current schema and re-indexed on every create,
+  register, and commit, in the same transaction as the pointer write), and
+  `properties.comment`. Identifiers split on underscores, so `email` finds
+  a `customer_email` column and `customer_email` matches it exactly; every
+  query token is also a prefix match.
+- **Ranking**: weighted `ts_rank` (name > path > columns > comment) plus
+  exact-name and name-prefix boosts. Results carry the asset type,
+  identifiers, rank, and a `ts_headline` snippet.
+- **Authorization** (`oidc` mode): no endpoint-level gate — results are
+  filtered to what the caller can see, inside the search query itself
+  (constant number of authorization queries per request, no per-result
+  round-trips). Tables/views require `READ` (direct, inherited from a
+  namespace, or from the warehouse); namespaces require `LIST_NAMESPACES`
+  on their warehouse; `admin` and `catalog_reader` see everything. An
+  ungranted caller gets an empty result list, not a 403.
+- **Known gaps (tracked, honest)**: view schemas are not column-indexed yet
+  (views match by name/path/comment only); the namespace-inheritance
+  visibility check probes the caller's granted-namespace set per matched
+  row inside the query — fine at small grant counts, a benchmark-phase
+  TODO recorded in `meridian_store::search`; no usage-based ranking, no
+  semantic search (both are later slices of the search feature).

@@ -12,6 +12,61 @@ releases begin, the project will adhere to
 
 ### Added
 
+- **Credential vending (S3/MinIO) and external endpoint advertisement**
+  ([docs/design/vending.md](docs/design/vending.md)). New
+  `meridian-vending` crate plus the IRC surfaces: `GET
+  .../tables/{table}/credentials` (`loadCredentials`) and the
+  `X-Iceberg-Access-Delegation: vended-credentials` header on
+  `createTable`/`loadTable`. Warehouses opt in via storage options —
+  `vending = "sts"` vends short-lived STS session credentials scoped by an
+  inline session policy to the one table's location prefix (verified
+  against MinIO end to end: read-only vs read-write scoping, cross-table
+  prefix isolation, TTL; standard AWS STS semantics but not yet
+  cloud-verified against real AWS), `vending = "static"` passes the
+  warehouse's own keys through for STS-less self-hosted setups (explicit
+  opt-in; the config-passthrough credential denylist stays absolute
+  otherwise), GCS/Azure honestly refuse as not implemented. Access follows
+  RBAC (`WRITE`/`COMMIT` → read-write, `READ` → read-only) and **every
+  vend writes an audit row and outbox event in one transaction before
+  credentials leave the server**. `remote-signing` is an honest 400. The
+  new `endpoint.external` storage option makes all client-facing config
+  advertise an external object-storage endpoint while the server keeps
+  using the internal one — the fix for the documented
+  `host.docker.internal` engine-networking issue. The e2e suite gains a
+  pyiceberg round trip whose client holds zero S3 configuration — only
+  the catalog URI.
+- **Catalog events: outbox relay, webhooks, and a queryable feed**
+  ([docs/design/events.md](docs/design/events.md)). Every catalog mutation
+  already wrote a transactional-outbox row; a background relay inside
+  `meridian serve` now publishes them as CloudEvents 1.0 JSON — in bounded
+  `SKIP LOCKED` batches, crash-safe (at-least-once), strictly ordered per
+  aggregate even with concurrent server replicas, and draining any
+  pre-existing backlog on first boot. Consumption surfaces: **webhooks**
+  (`/api/v2/webhooks` CRUD; HMAC-SHA256-signed deliveries with
+  per-endpoint exponential retry, dead-letter status and full delivery
+  history via `GET /api/v2/webhooks/{id}/deliveries`), a **queryable
+  feed** (`GET /api/v2/events`, keyset cursor = event id, gap-free via a
+  publication frontier), **named durable consumers**
+  (`/api/v2/events/consumers` + `next`/`commit`, persistent at-least-once
+  offsets), and `meridian events tail` in the CLI. All events endpoints
+  require management access in `oidc` mode (documented decision; a
+  finer-grained privilege is deferred). Migration 0008; broker (NATS/
+  Kafka) sinks are future work, tracked in the design doc.
+
+- **Asset search v1** (`GET /api/v2/search`, CLI `meridian search <query>`):
+  ranked Postgres full-text search across tables, views, and namespaces —
+  matching asset names, namespace paths, table **column names and docs**
+  (re-indexed from the current schema on every create/register/commit, in
+  the same transaction as the pointer write), and `properties.comment`,
+  with exact-name/prefix boosts, `ts_headline` snippets, and keyset
+  pagination. In `oidc` mode results are filtered to the caller's RBAC
+  visibility inside the query (no per-result authorization round-trips);
+  an ungranted caller gets an empty list. Trigger-maintained, GIN-indexed
+  tsvectors (migration 0010; the migration header documents the
+  trigger-vs-generated-column decision). Known gaps are documented in
+  [docs/api-status.md](docs/api-status.md#search-get-apiv2search): view
+  schemas are not column-indexed yet, no usage-based ranking, no semantic
+  search.
 - **Engine conformance matrix with Flink, Spark, and Trino smoke suites**
   ([conformance/engines/](conformance/engines/README.md)): pyiceberg
   0.11.1 and DuckDB 1.5.4 pass the e2e suite (full table lifecycle,

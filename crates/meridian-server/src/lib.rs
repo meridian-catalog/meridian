@@ -22,6 +22,7 @@ use ulid::Ulid;
 
 mod auth;
 pub mod error;
+pub mod events;
 pub mod routes;
 
 /// Shared state available to all handlers.
@@ -99,6 +100,10 @@ pub fn build_router(state: AppState) -> Router {
             post(routes::tables::report_metrics),
         )
         .route(
+            "/{prefix}/namespaces/{namespace}/tables/{table}/credentials",
+            get(routes::vending::load_credentials),
+        )
+        .route(
             "/{prefix}/tables/rename",
             post(routes::tables::rename_table),
         )
@@ -160,6 +165,40 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v2/grants/{id}", delete(routes::grants::delete_grant))
         .route("/api/v2/permissions", get(routes::grants::get_permissions))
+        // Asset search (Pillar A search v1): results are filtered to the
+        // caller's visibility inside the query — see routes::search.
+        .route("/api/v2/search", get(routes::search::search))
+        // Events surface (webhooks, feed, durable consumers) — see
+        // routes::events for the authorization policy.
+        .route(
+            "/api/v2/webhooks",
+            get(routes::events::list_webhooks).post(routes::events::create_webhook),
+        )
+        .route(
+            "/api/v2/webhooks/{id}",
+            get(routes::events::get_webhook).delete(routes::events::delete_webhook),
+        )
+        .route(
+            "/api/v2/webhooks/{id}/deliveries",
+            get(routes::events::list_webhook_deliveries),
+        )
+        .route("/api/v2/events", get(routes::events::list_events))
+        .route(
+            "/api/v2/events/consumers",
+            get(routes::events::list_consumers).post(routes::events::create_consumer),
+        )
+        .route(
+            "/api/v2/events/consumers/{name}",
+            delete(routes::events::delete_consumer),
+        )
+        .route(
+            "/api/v2/events/consumers/{name}/next",
+            get(routes::events::consumer_next),
+        )
+        .route(
+            "/api/v2/events/consumers/{name}/commit",
+            post(routes::events::consumer_commit),
+        )
         // Unmatched routes and wrong methods must still speak the IRC error
         // envelope — engines parse error bodies, not just status codes.
         .fallback(route_not_found)
@@ -225,6 +264,14 @@ pub async fn serve(config: AppConfig, pool: PgPool) -> Result<()> {
         .local_addr()
         .map_err(|e| MeridianError::internal("failed to read bound address", e))?;
 
+    // Background event workers (A-F6): the outbox relay publishes
+    // committed catalog events (draining any backlog in bounded batches on
+    // first boot) and the webhook dispatcher delivers them. Both are
+    // crash-safe by construction (durable outbox + durable deliveries), so
+    // aborting them at shutdown is fine — anything in flight is redone.
+    let relay = tokio::spawn(events::run_relay(pool.clone(), config.events.clone()));
+    let dispatcher = tokio::spawn(events::run_dispatcher(pool.clone(), config.events.clone()));
+
     let state = AppState {
         pool,
         config: Arc::new(config),
@@ -233,10 +280,14 @@ pub async fn serve(config: AppConfig, pool: PgPool) -> Result<()> {
 
     tracing::info!(%local_addr, "meridian server listening");
 
-    axum::serve(listener, app)
+    let served = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
-        .map_err(|e| MeridianError::internal("server error", e))?;
+        .map_err(|e| MeridianError::internal("server error", e));
+
+    relay.abort();
+    dispatcher.abort();
+    served?;
 
     tracing::info!("meridian server shut down cleanly");
     Ok(())

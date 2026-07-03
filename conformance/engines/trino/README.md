@@ -112,6 +112,16 @@ client-side `s3.endpoint=http://host.docker.internal:9000` override in
 `etc/mrd.properties` sticks. The container runs on the default bridge
 network with `--add-host host.docker.internal:host-gateway`.
 
+The general fix for this class of problem now exists server-side: the
+`endpoint.external` warehouse storage option makes every client-facing
+config advertise an external address while the server keeps using the
+internal one — see
+[Storage config passthrough](../../../docs/api-status.md#storage-config-passthrough).
+Trino can also now run with
+`iceberg.rest-catalog.vended-credentials-enabled=true` against a
+warehouse with `vending = "sts"`; this smoke has not been switched over
+yet (cleanup TODO).
+
 ## Version pinning
 
 | Component | Version | Why |

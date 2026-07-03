@@ -93,8 +93,13 @@ Meridian vends the warehouse's `s3.endpoint`
 Iceberg Java REST client merges that vended config **over** catalog-level
 client properties — so an engine container cannot override the endpoint
 client-side; a `host.docker.internal` override in `CREATE CATALOG` is
-silently clobbered back on every table load. Vending separate
-internal/external endpoints is a known limitation on the roadmap.
+silently clobbered back on every table load. Separate internal/external
+endpoints now exist: set the `endpoint.external` storage option on the
+warehouse and every client-facing config advertises it while the server
+keeps using `endpoint` internally — see
+[Storage config passthrough](../../../docs/api-status.md#storage-config-passthrough).
+This smoke still uses host networking (predates the option); switching it
+over is a cleanup TODO.
 
 ### Hadoop is still required
 

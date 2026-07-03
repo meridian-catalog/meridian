@@ -50,16 +50,21 @@ async fn outbox_enqueue_inserts_unpublished_event() {
         event_type: "test.enqueued".to_owned(),
         payload: json!({"n": 1}),
     };
-    let id = outbox::enqueue(&pool, &event).await.expect("enqueue");
+    // Enqueue and read back on one uncommitted transaction: a concurrent
+    // relay (other test binaries drain the outbox) cannot see or publish
+    // the row, so the freshly-enqueued state is observable race-free.
+    let mut tx = pool.begin().await.expect("begin");
+    let id = outbox::enqueue(&mut *tx, &event).await.expect("enqueue");
 
     let (event_type, published): (String, Option<chrono::DateTime<chrono::Utc>>) =
         sqlx::query_as("SELECT event_type, published_at FROM events_outbox WHERE id = $1")
             .bind(&id)
-            .fetch_one(&pool)
+            .fetch_one(&mut *tx)
             .await
             .expect("read back event");
     assert_eq!(event_type, "test.enqueued");
     assert!(published.is_none(), "new events must be unpublished");
+    tx.rollback().await.expect("rollback");
 }
 
 #[tokio::test]

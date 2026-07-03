@@ -31,6 +31,7 @@ const IMPLEMENTED_ENDPOINTS: &[&str] = &[
     "DELETE /v1/{prefix}/namespaces/{namespace}/tables/{table}",
     "POST /v1/{prefix}/namespaces/{namespace}/register",
     "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics",
+    "GET /v1/{prefix}/namespaces/{namespace}/tables/{table}/credentials",
     "POST /v1/{prefix}/tables/rename",
     "POST /v1/{prefix}/transactions/commit",
     "GET /v1/{prefix}/namespaces/{namespace}/views",

@@ -51,7 +51,9 @@ pub struct WarehouseResponse {
     pub name: String,
     /// Storage root URI.
     pub storage_root: String,
-    /// Non-secret storage options.
+    /// Storage options with secret values redacted (`***`). Secrets can be
+    /// written through this API but are never read back, even by admins —
+    /// they live in the store for the server's own use only.
     pub storage_options: BTreeMap<String, String>,
     /// Creation time.
     pub created_at: DateTime<Utc>,
@@ -59,13 +61,30 @@ pub struct WarehouseResponse {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Storage-option keys whose values are secrets. Kept aligned with the
+/// client-config denylist in `routes::views`; redaction here covers the
+/// management API, which echoes options back to callers.
+const SECRET_OPTION_KEYS: &[&str] = &["access-key-id", "secret-access-key", "session-token"];
+
 impl From<WarehouseRecord> for WarehouseResponse {
     fn from(record: WarehouseRecord) -> Self {
+        let storage_options = record
+            .storage_config
+            .0
+            .into_iter()
+            .map(|(key, value)| {
+                if SECRET_OPTION_KEYS.contains(&key.as_str()) {
+                    (key, "***".to_owned())
+                } else {
+                    (key, value)
+                }
+            })
+            .collect();
         Self {
             id: record.id,
             name: record.name,
             storage_root: record.storage_root,
-            storage_options: record.storage_config.0,
+            storage_options,
             created_at: record.created_at,
             updated_at: record.updated_at,
         }
@@ -99,6 +118,49 @@ fn validate_name(name: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Validates the vending-related storage options (`vending`, `vending.*`,
+/// `endpoint.external`) so a broken vending setup fails here — loudly, at
+/// create time — instead of surfacing on the first table load.
+fn validate_vending_options(
+    storage_root: &str,
+    options: &std::collections::BTreeMap<String, String>,
+) -> Result<(), ApiError> {
+    let config = meridian_vending::VendingConfig::parse(options)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let is_s3 = {
+        let root = storage_root.trim().to_ascii_lowercase();
+        root.starts_with("s3://") || root.starts_with("s3a://")
+    };
+    if config.is_enabled() && !is_s3 {
+        return Err(ApiError::bad_request(format!(
+            "vending = {:?} requires an s3:// storage root; \
+             credential vending does not apply to {storage_root:?}",
+            config.mode_str(),
+        )));
+    }
+    if config == meridian_vending::VendingConfig::Static
+        && meridian_vending::StaticVendor::new(
+            options.get("access-key-id").map(String::as_str),
+            options.get("secret-access-key").map(String::as_str),
+            options.get("session-token").map(String::as_str),
+        )
+        .is_err()
+    {
+        return Err(ApiError::bad_request(
+            "vending = \"static\" requires access-key-id and secret-access-key \
+             in the storage options",
+        ));
+    }
+    if let Some(external) = options.get("endpoint.external")
+        && external.trim().is_empty()
+    {
+        return Err(ApiError::bad_request(
+            "endpoint.external must not be blank when set",
+        ));
+    }
+    Ok(())
+}
+
 /// `POST /api/v2/warehouses` — register a warehouse.
 pub async fn create_warehouse(
     State(state): State<AppState>,
@@ -110,6 +172,7 @@ pub async fn create_warehouse(
     if request.storage_root.trim().is_empty() {
         return Err(ApiError::bad_request("storage_root must not be empty"));
     }
+    validate_vending_options(&request.storage_root, &request.storage_options)?;
 
     let record = warehouse::create(
         &state.pool,
