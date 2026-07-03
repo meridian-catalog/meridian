@@ -94,6 +94,7 @@ async fn make_table(
             format_version: 2,
             properties: &BTreeMap::new(),
             schema_text: None,
+            snapshots: &[],
             origin: "create",
         },
         ACTOR,

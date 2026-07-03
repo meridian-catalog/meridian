@@ -109,6 +109,7 @@ async fn make_table(
             format_version: 2,
             properties: &properties,
             schema_text,
+            snapshots: &[],
             origin: "create",
         },
         "test:search",

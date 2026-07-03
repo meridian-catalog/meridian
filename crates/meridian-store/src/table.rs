@@ -88,9 +88,44 @@ pub struct NewTable<'a> {
     /// indexed for full-text search (migration 0010; see
     /// [`crate::search::schema_search_text`]).
     pub schema_text: Option<&'a str>,
+    /// Snapshot rows to write-through-index (migration 0003; powers health,
+    /// reconciliation, and observability). Adopted (`register`) tables carry
+    /// their full history here; a fresh table's slice is empty.
+    pub snapshots: &'a [crate::commit::SnapshotIndexRow],
     /// How the table came to be, recorded in the audit trail:
     /// `"create"`, `"register"`, or `"commit-create"`.
     pub origin: &'a str,
+}
+
+/// Inserts write-through snapshot-index rows for a table on the caller's
+/// transaction (migration 0003). Used by table creation and registration so
+/// health, reconciliation, and observability see a table's history.
+async fn index_snapshots(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    table_id: &str,
+    snapshots: &[crate::commit::SnapshotIndexRow],
+) -> Result<()> {
+    for snapshot in snapshots {
+        sqlx::query(
+            "INSERT INTO table_snapshots
+                 (table_id, snapshot_id, parent_snapshot_id, sequence_number, timestamp_ms,
+                  manifest_list, operation, summary, is_current)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(table_id)
+        .bind(snapshot.snapshot_id)
+        .bind(snapshot.parent_snapshot_id)
+        .bind(snapshot.sequence_number)
+        .bind(snapshot.timestamp_ms)
+        .bind(&snapshot.manifest_list)
+        .bind(&snapshot.operation)
+        .bind(&snapshot.summary)
+        .bind(snapshot.is_current)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| map_sqlx_error("failed to index table snapshots", e))?;
+    }
+    Ok(())
 }
 
 /// True when the error is a Postgres unique-constraint violation.
@@ -238,6 +273,11 @@ pub async fn create(
     if let Some(receipt) = receipt {
         record_receipt(&mut tx, table.workspace_id, receipt).await?;
     }
+
+    // Write-through-index the adopted snapshots (register carries history;
+    // create passes an empty slice). Same transaction as the pointer row so
+    // the index can never lag the table (write-through invariant, §8.2).
+    index_snapshots(&mut tx, &id, table.snapshots).await?;
 
     let payload = json!({
         "namespace": table.namespace_levels,

@@ -547,7 +547,7 @@ impl CommitBackend for PostgresCommitBackend {
 }
 
 /// Replaces the snapshot index rows for a table from the new metadata.
-async fn write_snapshot_index(
+pub(crate) async fn write_snapshot_index(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     table_id: &str,
     snapshots: &[SnapshotIndexRow],
