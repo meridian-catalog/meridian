@@ -23,6 +23,7 @@ use ulid::Ulid;
 mod auth;
 pub mod error;
 pub mod events;
+pub mod planning;
 pub mod routes;
 
 /// Shared state available to all handlers.
@@ -58,6 +59,9 @@ pub fn build_router(state: AppState) -> Router {
     // cache). Constructed once; logs the loud warning when auth is
     // disabled and fails closed when OIDC setup is broken.
     let auth_state = auth::AuthState::from_app_config(&state.config, state.pool.clone());
+    // Scan-planning runtime (manifest LRU, bounded async plan pool),
+    // shared by the planning handlers via a request extension.
+    let planning_runtime = planning::PlanningRuntime::from_config(&state.config.planning);
 
     // The Iceberg REST surface, mounted both at the spec path prefix
     // (/iceberg/v1) and at the bare /v1 alias many clients default to.
@@ -102,6 +106,26 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/{prefix}/namespaces/{namespace}/tables/{table}/credentials",
             get(routes::vending::load_credentials),
+        )
+        // Remote signing (ADR 005): SigV4-signs client-built S3 requests
+        // after proving they stay inside this table's location prefix.
+        .route(
+            "/{prefix}/namespaces/{namespace}/tables/{table}/sign",
+            post(routes::signing::sign_request),
+        )
+        // Server-side scan planning (design doc: docs/design/scan-planning.md):
+        // planTableScan, fetchPlanningResult, cancelPlanning, fetchScanTasks.
+        .route(
+            "/{prefix}/namespaces/{namespace}/tables/{table}/plan",
+            post(routes::planning::plan_table_scan),
+        )
+        .route(
+            "/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan_id}",
+            get(routes::planning::fetch_planning_result).delete(routes::planning::cancel_planning),
+        )
+        .route(
+            "/{prefix}/namespaces/{namespace}/tables/{table}/tasks",
+            post(routes::planning::fetch_scan_tasks),
         )
         .route(
             "/{prefix}/tables/rename",
@@ -212,7 +236,8 @@ pub fn build_router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             auth::authenticate,
-        ));
+        ))
+        .layer(axum::Extension(planning_runtime));
 
     routes.layer(
         ServiceBuilder::new()
@@ -271,6 +296,9 @@ pub async fn serve(config: AppConfig, pool: PgPool) -> Result<()> {
     // aborting them at shutdown is fine — anything in flight is redone.
     let relay = tokio::spawn(events::run_relay(pool.clone(), config.events.clone()));
     let dispatcher = tokio::spawn(events::run_dispatcher(pool.clone(), config.events.clone()));
+    // Planning sweep: expires plan rows (crash orphans included) and
+    // enforces the manifest byte-cache budget. Idempotent; safe to abort.
+    let plan_sweeper = tokio::spawn(planning::run_sweeper(pool.clone(), config.planning.clone()));
 
     let state = AppState {
         pool,
@@ -287,6 +315,7 @@ pub async fn serve(config: AppConfig, pool: PgPool) -> Result<()> {
 
     relay.abort();
     dispatcher.abort();
+    plan_sweeper.abort();
     served?;
 
     tracing::info!("meridian server shut down cleanly");

@@ -82,6 +82,17 @@ aws-config = { version = "1", default-features = false, features = ["behavior-ve
 aws-credential-types = "1"
 aws-sdk-sts = { version = "1", default-features = false, features = ["rt-tokio", "rustls"] }
 
+# Remote signing (ADR 005): SigV4 header signing plus the Identity type its
+# API needs. Both were already in the tree transitively via aws-sdk-sts.
+aws-sigv4 = "1"
+aws-smithy-runtime-api = "1"
+percent-encoding = "2"
+
+# Avro object-container files (Iceberg manifest lists and manifests).
+# deflate support is built in; snappy/zstandard cover the other codecs
+# engines commonly use for manifest Avro.
+apache-avro = { version = "0.21", features = ["snappy", "zstandard"] }
+
 # Hashing & message authentication (webhook signatures)
 sha2 = "0.10"
 hex = "0.4"

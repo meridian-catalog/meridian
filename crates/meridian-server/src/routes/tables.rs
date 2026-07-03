@@ -93,6 +93,7 @@ use crate::routes::grants::{namespace_scope_chain, require};
 use crate::routes::namespaces::{
     decode_namespace_param, next_page_token, resolve_pagination, resolve_warehouse,
 };
+use crate::routes::signing::remote_signing_config;
 use crate::routes::vending::{
     RequestedDelegation, VendContext, requested_delegation, storage_credential_json,
     vend_access_mode, vend_for_table,
@@ -156,7 +157,7 @@ fn validate_table_name(name: &str) -> Result<(), ApiError> {
 }
 
 /// Connects the warehouse's storage profile.
-fn connect_storage(warehouse: &WarehouseRecord) -> Result<Arc<dyn Storage>, ApiError> {
+pub(crate) fn connect_storage(warehouse: &WarehouseRecord) -> Result<Arc<dyn Storage>, ApiError> {
     let profile =
         meridian_storage::StorageProfile::parse(&warehouse.storage_root, &warehouse.storage_config)
             .map_err(|e| storage_config_error(&warehouse.name, &e))?;
@@ -185,7 +186,7 @@ fn display_ident(levels: &[String], name: &str) -> String {
     }
 }
 
-fn no_such_table(levels: &[String], name: &str) -> ApiError {
+pub(crate) fn no_such_table(levels: &[String], name: &str) -> ApiError {
     ApiError::no_such_table(format!(
         "table {:?} does not exist",
         display_ident(levels, name)
@@ -248,6 +249,17 @@ fn attach_vended(body: &mut Value, vended: &meridian_vending::VendedCredentials)
         }
     }
     body["storage-credentials"] = json!([storage_credential_json(vended)]);
+}
+
+/// Merges the remote-signing client properties (see
+/// [`remote_signing_config`]) into a `LoadTableResult`'s `config`. No
+/// credential material is involved — only the switch and the endpoint.
+fn attach_signing(body: &mut Value, signing: &std::collections::BTreeMap<String, String>) {
+    if let Some(config) = body.get_mut("config").and_then(Value::as_object_mut) {
+        for (key, value) in signing {
+            config.insert(key.clone(), Value::String(value.clone()));
+        }
+    }
 }
 
 // -- ETags -------------------------------------------------------------------
@@ -862,6 +874,19 @@ pub async fn create_table(
         if let Some(vended) = vended {
             attach_vended(&mut body, &vended);
         }
+    } else if delegation == RequestedDelegation::RemoteSigning {
+        // The creator is about to write the first data files through the
+        // sign endpoint; advertisement only — nothing is vended, and
+        // method policy is enforced per signing request.
+        if let Some(signing) = remote_signing_config(
+            &ctx.warehouse,
+            &prefix,
+            &ctx.levels,
+            &request.name,
+            &metadata.location,
+        ) {
+            attach_signing(&mut body, &signing);
+        }
     }
     Ok(json_with_etag(
         StatusCode::OK,
@@ -877,7 +902,7 @@ pub async fn create_table(
 /// Resolves a table for a table-scoped endpoint (missing namespace and
 /// missing table are both `NoSuchTableException`, per the spec's loadTable
 /// error shape).
-async fn resolve_table(
+pub(crate) async fn resolve_table(
     state: &AppState,
     prefix: &str,
     raw_namespace: &str,
@@ -967,6 +992,16 @@ pub async fn load_table(
         .await?;
         if let Some(vended) = vended {
             attach_vended(&mut body, &vended);
+        }
+    } else if delegation == RequestedDelegation::RemoteSigning {
+        // Advertisement only (silently skipped where signing cannot work,
+        // mirroring the vended-credentials no-op on vending-disabled
+        // warehouses): the per-request policy at the sign endpoint is
+        // where access is enforced.
+        if let Some(signing) =
+            remote_signing_config(&warehouse, &prefix, &levels, &name, &metadata.location)
+        {
+            attach_signing(&mut body, &signing);
         }
     }
     Ok(json_with_etag(StatusCode::OK, body, &etag))

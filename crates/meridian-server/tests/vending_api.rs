@@ -251,7 +251,9 @@ async fn sts_vending_vends_scoped_credentials_and_audits_every_vend() {
         );
     }
 
-    // remote-signing alone: honest 400.
+    // remote-signing alone: the sign endpoint is advertised instead of
+    // credentials (full matrix in tests/signing_api.rs). No vend happens,
+    // so the audit count below stays at 3.
     let (status, raw) = send(
         &router,
         "GET",
@@ -260,8 +262,11 @@ async fn sts_vending_vends_scoped_credentials_and_audits_every_vend() {
         &[(DELEGATION_HEADER, "remote-signing")],
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "remote-signing: {raw}");
-    assert!(raw.contains("not implemented"), "message: {raw}");
+    assert_eq!(status, StatusCode::OK, "remote-signing: {raw}");
+    let body = parse(&raw);
+    assert_eq!(body["config"]["s3.remote-signing-enabled"], "true");
+    assert!(body.get("storage-credentials").is_none());
+    assert!(body["config"].get("s3.session-token").is_none());
 
     // loadCredentials: the spec's LoadCredentialsResponse.
     let (status, raw) = send(&router, "GET", &format!("{uri}/credentials"), None, &[]).await;

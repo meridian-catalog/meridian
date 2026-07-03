@@ -10,6 +10,7 @@ pub mod commit;
 pub mod consumer;
 pub mod namespace;
 pub mod outbox;
+pub mod planning;
 pub mod pool;
 pub mod principal;
 pub mod rbac;

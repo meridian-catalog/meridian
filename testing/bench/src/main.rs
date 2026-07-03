@@ -7,6 +7,12 @@
 //! - `load-table`   — `GET …/tables/{table}` against a wide, multi-snapshot
 //!   fixture table, swept over several concurrency levels
 //! - `commit`       — sequential `set-properties` commits (`POST …/tables/{table}`)
+//! - `plan` / `plan-full` — server-side scan planning (`POST …/plan`)
+//!   against a synthetic many-file table (see `--setup-plan`): `plan`
+//!   sends a partition-selective filter, `plan-full` an unfiltered scan.
+//!   Submissions answered `submitted` are polled to completion inside the
+//!   timed window and then cancelled (one extra request), so async-mode
+//!   numbers are end-to-end plan latency, not just the submit call.
 //!
 //! Auth is pluggable: `--auth none` or `--auth oauth2` (client-credentials
 //! token fetched once, before any timed request).
@@ -16,6 +22,8 @@ mod runner;
 mod stats;
 
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use clap::Parser;
 use serde::Serialize;
@@ -123,6 +131,50 @@ struct Args {
     #[arg(long, default_value_t = 100)]
     config_warmup: u64,
 
+    /// Create the scan-planning fixture table (real manifests written to
+    /// --plan-storage-root, register via IRC). Requires the harness to
+    /// have write access to the warehouse's storage.
+    #[arg(long)]
+    setup_plan: bool,
+
+    #[arg(long, default_value = "plan_ns")]
+    plan_namespace: String,
+
+    #[arg(long, default_value = "plan_10k")]
+    plan_table: String,
+
+    /// Data files in the planning fixture.
+    #[arg(long, default_value_t = 10_000)]
+    plan_files: usize,
+
+    /// Identity partitions in the planning fixture.
+    #[arg(long, default_value_t = 100)]
+    plan_partitions: usize,
+
+    /// Data files per manifest in the planning fixture.
+    #[arg(long, default_value_t = 100)]
+    plan_files_per_manifest: usize,
+
+    /// Warehouse storage root for --setup-plan (e.g.
+    /// `s3://bench-meridian/warehouse` or `file:///tmp/wh`); the fixture
+    /// lands under `{root}/{plan-namespace}/{plan-table}`.
+    #[arg(long)]
+    plan_storage_root: Option<String>,
+
+    /// Storage options for --setup-plan as key=value (repeatable), e.g.
+    /// endpoint=http://localhost:9000 access-key-id=… — the same options
+    /// the warehouse was created with.
+    #[arg(long)]
+    plan_storage_option: Vec<String>,
+
+    /// Measured plan requests per plan scenario.
+    #[arg(long, default_value_t = 500)]
+    plan_n: u64,
+
+    /// Warm-up plan requests (excluded).
+    #[arg(long, default_value_t = 50)]
+    plan_warmup: u64,
+
     /// Write the JSON report here.
     #[arg(long)]
     out: Option<std::path::PathBuf>,
@@ -212,6 +264,38 @@ async fn run(args: Args) -> Result<()> {
             .await?;
     }
 
+    if args.setup_plan {
+        let storage_root = args
+            .plan_storage_root
+            .as_deref()
+            .ok_or("--plan-storage-root is required with --setup-plan")?;
+        let mut storage_options = std::collections::BTreeMap::new();
+        for option in &args.plan_storage_option {
+            let (key, value) = option
+                .split_once('=')
+                .ok_or_else(|| format!("--plan-storage-option {option:?} is not key=value"))?;
+            storage_options.insert(key.to_owned(), value.to_owned());
+        }
+        eprintln!(
+            "setting up planning fixture {}.{} ({} files, {} partitions)…",
+            args.plan_namespace, args.plan_table, args.plan_files, args.plan_partitions
+        );
+        cat.setup_plan_fixture(
+            &args.plan_namespace,
+            &args.plan_table,
+            storage_root,
+            &storage_options,
+            &meridian_bench::fixture::SyntheticSpec {
+                table_location: String::new(), // derived inside
+                data_files: args.plan_files,
+                partitions: args.plan_partitions,
+                files_per_manifest: args.plan_files_per_manifest,
+                rows_per_file: 1_000,
+            },
+        )
+        .await?;
+    }
+
     let mut results: Vec<ScenarioResult> = Vec::new();
     for scenario in &args.scenarios {
         match scenario.as_str() {
@@ -264,6 +348,47 @@ async fn run(args: Args) -> Result<()> {
                 };
                 report_raw(&mut results, "commit", 1, args.commit_warmup, &raw);
             }
+            "plan" | "plan-full" => {
+                let table_url = cat.table_url(&args.plan_namespace, &args.plan_table);
+                let selective = scenario == "plan";
+                let partitions = args.plan_partitions.max(1);
+                let async_completions = Arc::new(AtomicU64::new(0));
+                let raw = {
+                    let cat = cat.clone();
+                    let table_url = table_url.clone();
+                    let async_completions = Arc::clone(&async_completions);
+                    runner::run(1, args.plan_warmup, args.plan_n, move |i| {
+                        let cat = cat.clone();
+                        let table_url = table_url.clone();
+                        let async_completions = Arc::clone(&async_completions);
+                        async move {
+                            let body = if selective {
+                                let region = format!(
+                                    "region_{:03}",
+                                    usize::try_from(i).unwrap_or(0) % partitions
+                                );
+                                json!({
+                                    "filter": {"type": "eq", "term": "region", "value": region},
+                                    "stats-fields": ["id"],
+                                })
+                            } else {
+                                json!({})
+                            };
+                            plan_once(&cat, &table_url, &body, &async_completions).await
+                        }
+                    })
+                    .await?
+                };
+                let async_count = async_completions.load(Ordering::Relaxed);
+                if async_count > 0 {
+                    eprintln!(
+                        "{scenario}: {async_count} of {} plans took the asynchronous \
+                         (submitted/poll/cancel) path",
+                        args.plan_n + args.plan_warmup
+                    );
+                }
+                report_raw(&mut results, scenario, 1, args.plan_warmup, &raw);
+            }
             other => return Err(format!("unknown scenario: {other}").into()),
         }
     }
@@ -291,6 +416,70 @@ async fn run(args: Args) -> Result<()> {
     }
     println!("{md_text}");
     Ok(())
+}
+
+/// One end-to-end plan: submit; if `submitted`, poll fetchPlanningResult
+/// to a terminal status and cancel (releasing the server-held pages).
+/// Everything happens inside the timed window.
+async fn plan_once(
+    cat: &Catalog,
+    table_url: &str,
+    body: &serde_json::Value,
+    async_completions: &AtomicU64,
+) -> std::result::Result<(), String> {
+    let plan_url = format!("{table_url}/plan");
+    let response = cat
+        .post_json(&plan_url, body)
+        .send()
+        .await
+        .map_err(|e| format!("transport: {e}"))?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("HTTP {status}: {text}"));
+    }
+    let parsed: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("bad plan response: {e}"))?;
+    match parsed["status"].as_str() {
+        Some("completed") => Ok(()),
+        Some("submitted") => {
+            let plan_id = parsed["plan-id"]
+                .as_str()
+                .ok_or("submitted response without plan-id")?
+                .to_owned();
+            async_completions.fetch_add(1, Ordering::Relaxed);
+            let result_url = format!("{plan_url}/{plan_id}");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            loop {
+                let response = cat
+                    .get(&result_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("poll transport: {e}"))?;
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                if !status.is_success() {
+                    return Err(format!("poll HTTP {status}: {text}"));
+                }
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&text).map_err(|e| format!("bad poll response: {e}"))?;
+                match parsed["status"].as_str() {
+                    Some("completed") => break,
+                    Some("submitted") => {
+                        if std::time::Instant::now() > deadline {
+                            return Err("plan did not complete within 60s".to_owned());
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    other => return Err(format!("plan ended {other:?}: {text}")),
+                }
+            }
+            // Well-behaved client: release the held result pages.
+            let _ = cat.delete(&result_url).send().await;
+            Ok(())
+        }
+        other => Err(format!("unexpected plan status {other:?}: {text}")),
+    }
 }
 
 /// Sends a prepared request and maps the response to the runner's outcome.

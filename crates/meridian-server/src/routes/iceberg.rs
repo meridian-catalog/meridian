@@ -32,6 +32,7 @@ const IMPLEMENTED_ENDPOINTS: &[&str] = &[
     "POST /v1/{prefix}/namespaces/{namespace}/register",
     "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics",
     "GET /v1/{prefix}/namespaces/{namespace}/tables/{table}/credentials",
+    "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/sign",
     "POST /v1/{prefix}/tables/rename",
     "POST /v1/{prefix}/transactions/commit",
     "GET /v1/{prefix}/namespaces/{namespace}/views",
@@ -41,6 +42,15 @@ const IMPLEMENTED_ENDPOINTS: &[&str] = &[
     "POST /v1/{prefix}/namespaces/{namespace}/views/{view}",
     "DELETE /v1/{prefix}/namespaces/{namespace}/views/{view}",
     "POST /v1/{prefix}/views/rename",
+];
+
+/// Scan-planning endpoints, advertised only while `planning.enabled`
+/// (the handlers answer 406 when it is off).
+const PLANNING_ENDPOINTS: &[&str] = &[
+    "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/plan",
+    "GET /v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}",
+    "DELETE /v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}",
+    "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/tasks",
 ];
 
 /// How long idempotency-key receipts are replayable, advertised to clients
@@ -99,13 +109,18 @@ pub async fn get_config(
         overrides.insert("prefix".to_owned(), wh.name);
     }
 
+    let mut endpoints: Vec<String> = IMPLEMENTED_ENDPOINTS
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    if state.config.planning.enabled {
+        endpoints.extend(PLANNING_ENDPOINTS.iter().map(|s| (*s).to_owned()));
+    }
+
     Ok(Json(CatalogConfig {
         defaults: BTreeMap::new(),
         overrides,
-        endpoints: IMPLEMENTED_ENDPOINTS
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect(),
+        endpoints,
         idempotency_key_lifetime: Some(IDEMPOTENCY_KEY_LIFETIME.to_owned()),
     }))
 }

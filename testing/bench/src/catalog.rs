@@ -110,6 +110,11 @@ impl Catalog {
         self.authed(self.http.post(url).json(body))
     }
 
+    /// A DELETE request builder with auth applied.
+    pub(crate) fn delete(&self, url: &str) -> reqwest::RequestBuilder {
+        self.authed(self.http.delete(url))
+    }
+
     fn authed(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.bearer {
             Some(token) => rb.bearer_auth(token),
@@ -237,6 +242,73 @@ impl Catalog {
 }
 
 /// A flat schema with `columns` fields of mixed primitive types.
+impl Catalog {
+    /// Registers the scan-planning fixture: generates a synthetic table
+    /// (real Avro manifests; data files referenced, never written) with
+    /// `meridian_bench::fixture`, writes it through `meridian-storage`
+    /// (so `file://` and `s3://` warehouses both work), and registers it
+    /// via the IRC register endpoint. Any previous fixture table of the
+    /// same name is dropped first.
+    pub(crate) async fn setup_plan_fixture(
+        &self,
+        namespace: &str,
+        table: &str,
+        storage_root: &str,
+        storage_options: &std::collections::BTreeMap<String, String>,
+        spec: &meridian_bench::fixture::SyntheticSpec,
+    ) -> Result<()> {
+        // Drop a previous fixture (ignore "does not exist").
+        let _ = self
+            .delete(&format!(
+                "{}?purgeRequested=false",
+                self.table_url(namespace, table)
+            ))
+            .send()
+            .await;
+        // Namespace create tolerates "already exists".
+        let _ = self
+            .post_json(
+                &format!("{}/v1/{}/namespaces", self.base, self.prefix),
+                &serde_json::json!({ "namespace": [namespace] }),
+            )
+            .send()
+            .await;
+
+        let spec = meridian_bench::fixture::SyntheticSpec {
+            table_location: format!("{}/{namespace}/{table}", storage_root.trim_end_matches('/')),
+            ..spec.clone()
+        };
+        let generated = meridian_bench::fixture::synthetic_table(&spec)?;
+        let profile = meridian_storage::StorageProfile::parse(storage_root, storage_options)
+            .map_err(|e| format!("parse --plan-storage-root: {e}"))?;
+        let storage = profile
+            .connect()
+            .map_err(|e| format!("connect fixture storage: {e}"))?;
+        for (location, bytes) in &generated.files {
+            storage
+                .write(location, bytes::Bytes::from(bytes.clone()))
+                .await
+                .map_err(|e| format!("write {location}: {e}"))?;
+        }
+
+        self.expect_2xx(
+            self.post_json(
+                &format!(
+                    "{}/v1/{}/namespaces/{namespace}/register",
+                    self.base, self.prefix
+                ),
+                &serde_json::json!({
+                    "name": table,
+                    "metadata-location": generated.metadata_location,
+                }),
+            ),
+            "register plan fixture",
+        )
+        .await?;
+        Ok(())
+    }
+}
+
 fn wide_schema(columns: u32) -> Value {
     const TYPES: [&str; 10] = [
         "long",

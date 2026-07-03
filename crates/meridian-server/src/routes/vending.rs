@@ -16,8 +16,9 @@
 //!   `LoadCredentialsResponse`; table loads that carry
 //!   `X-Iceberg-Access-Delegation: vended-credentials` get the same
 //!   credentials merged into `LoadTableResult.config` **and** mirrored in
-//!   its `storage-credentials` field. `remote-signing` (alone) is an
-//!   honest 400: not implemented yet.
+//!   its `storage-credentials` field. `remote-signing` (alone) switches
+//!   the table onto the sign endpoint instead (see [`super::signing`]);
+//!   when both are listed, vended credentials win.
 //! - **Every vend is audited**: an `audit.credential.vend` row and a
 //!   `credential.vended` outbox event (principal, table, scope prefix,
 //!   access, ttl, mode) are written in one transaction before the
@@ -54,16 +55,20 @@ use crate::routes::namespaces::decode_namespace_param;
 pub(crate) enum RequestedDelegation {
     /// No header: plain config passthrough only.
     None,
-    /// `vended-credentials` (possibly alongside `remote-signing`; vended
-    /// credentials are the mechanism this server implements, so they win).
+    /// `vended-credentials` (possibly alongside `remote-signing`; when
+    /// both are listed the server chooses, and it chooses vended
+    /// credentials — no per-object round trips).
     VendedCredentials,
+    /// `remote-signing` without `vended-credentials`: advertise the sign
+    /// endpoint (see [`super::signing`]) instead of shipping credentials.
+    RemoteSigning,
 }
 
 /// Parses the `X-Iceberg-Access-Delegation` header.
 ///
-/// `remote-signing` *alone* is an honest 400 (not implemented yet), as is
-/// a header carrying only unknown mechanisms; clients that list
-/// `vended-credentials` anywhere get vended credentials.
+/// A header carrying only unknown mechanisms is an honest 400; clients
+/// that list `vended-credentials` anywhere get vended credentials, and
+/// `remote-signing` without it gets the sign endpoint.
 pub(crate) fn requested_delegation(headers: &HeaderMap) -> Result<RequestedDelegation, ApiError> {
     let Some(raw) = headers.get("x-iceberg-access-delegation") else {
         return Ok(RequestedDelegation::None);
@@ -89,14 +94,11 @@ pub(crate) fn requested_delegation(headers: &HeaderMap) -> Result<RequestedDeleg
         .iter()
         .any(|m| m.eq_ignore_ascii_case("remote-signing"))
     {
-        return Err(ApiError::bad_request(
-            "remote-signing access delegation is not implemented yet; \
-             request vended-credentials instead",
-        ));
+        return Ok(RequestedDelegation::RemoteSigning);
     }
     Err(ApiError::bad_request(format!(
-        "unknown access-delegation mechanism(s) {raw:?}: \
-         this server supports \"vended-credentials\""
+        "unknown access-delegation mechanism(s) {raw:?}: this server \
+         supports \"vended-credentials\" and \"remote-signing\""
     )))
 }
 
@@ -381,8 +383,8 @@ pub async fn load_credentials(
 }
 
 /// Connects the warehouse's storage profile (local twin of the table
-/// module's private helper).
-fn connect_storage(warehouse: &WarehouseRecord) -> Result<Arc<dyn Storage>, ApiError> {
+/// module's private helper; also used by [`super::signing`]).
+pub(crate) fn connect_storage(warehouse: &WarehouseRecord) -> Result<Arc<dyn Storage>, ApiError> {
     let profile =
         meridian_storage::StorageProfile::parse(&warehouse.storage_root, &warehouse.storage_config)
             .map_err(|e| {
@@ -450,9 +452,18 @@ mod tests {
     }
 
     #[test]
-    fn remote_signing_alone_is_an_honest_400() {
-        let error = requested_delegation(&headers("remote-signing")).expect_err("must reject");
-        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    fn remote_signing_alone_selects_remote_signing() {
+        for value in [
+            "remote-signing",
+            "REMOTE-SIGNING",
+            " remote-signing ,unknown",
+        ] {
+            assert_eq!(
+                requested_delegation(&headers(value)).expect("parse"),
+                RequestedDelegation::RemoteSigning,
+                "value: {value:?}"
+            );
+        }
     }
 
     #[test]
