@@ -280,6 +280,7 @@ async fn index_follows_create_commit_rename_and_drop() {
                     schema_text: Some(format!("beta_{salt}")),
                     event_details: json!({}),
                 }),
+                contract_violation: None,
             }],
             None,
         )

@@ -327,6 +327,7 @@ async fn register_table(fx: &Fixture, name: &str, metadata_loc: &str) -> (String
                     new_metadata_location: new_loc,
                 },
                 derived: Some(derived),
+                contract_violation: None,
             }],
             None,
         )

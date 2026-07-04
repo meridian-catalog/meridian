@@ -43,6 +43,79 @@ pub struct AppConfig {
     pub maintenance: MaintenanceConfig,
     /// Catalog-federation settings (Pillar B inbound-mirror sync worker).
     pub federation: FederationConfig,
+    /// Lineage settings (Pillar F: the post-commit lineage worker and the
+    /// OpenLineage emitter).
+    pub lineage: LineageConfig,
+    /// Data-quality settings (Pillar E: the zero-scan monitor evaluation
+    /// worker that opens incidents from the commit stream).
+    pub quality: QualityConfig,
+}
+
+/// Data-quality settings (`[quality]`): the post-commit monitor evaluation
+/// worker (E-F1/E-F5). Monitors, incidents, contracts, and the quality score
+/// are always manageable through the API/CLI and readable in the console; this
+/// only governs the background *evaluation* worker that computes monitor
+/// results from the commit stream and opens incidents.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct QualityConfig {
+    /// Master switch for the monitor evaluation worker. When `false` the worker
+    /// is not spawned: monitors/incidents can still be managed and queried, but
+    /// nothing is evaluated on the commit stream and no incidents are opened
+    /// automatically.
+    pub enabled: bool,
+    /// How often (seconds) the worker polls the committed-event stream once
+    /// caught up.
+    pub poll_interval_secs: u64,
+    /// How many prior commits to summarize as the baseline history window for
+    /// the anomaly scorers. A larger window is more stable but slower to react
+    /// to a genuine regime change; the default balances the two.
+    pub history_window: i64,
+    /// Commit-failure storm threshold: this many failed/retried commit attempts
+    /// on a table inside the window opens a commit-failure incident.
+    pub commit_failure_threshold: i64,
+}
+
+impl Default for QualityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            poll_interval_secs: 5,
+            history_window: 20,
+            commit_failure_threshold: 5,
+        }
+    }
+}
+
+/// Lineage settings (`[lineage]`): the post-commit lineage worker (F-F1) and
+/// the OpenLineage emitter for Meridian-initiated jobs (F-F2). The OpenLineage
+/// *sink* (`POST /api/v2/lineage/openlineage`) is always available and needs
+/// no configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LineageConfig {
+    /// Master switch for the post-commit lineage worker. When `false` the
+    /// worker is not spawned: the `OpenLineage` sink and the graph/impact reads
+    /// still work, but commit-native edges are not derived on a schedule.
+    pub enabled: bool,
+    /// How often (seconds) the post-commit worker polls the committed-event
+    /// stream once caught up.
+    pub poll_interval_secs: u64,
+    /// Optional `OpenLineage` collector base URL (e.g. a Marquez instance).
+    /// When set, Meridian-initiated jobs emit a `RunEvent` to
+    /// `<url>/api/v1/lineage`; when unset, nothing is emitted (events can
+    /// still be pulled from Meridian's own lineage graph).
+    pub openlineage_url: Option<String>,
+}
+
+impl Default for LineageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            poll_interval_secs: 5,
+            openlineage_url: None,
+        }
+    }
 }
 
 /// Catalog-federation settings (`[federation]`): the background sync worker
