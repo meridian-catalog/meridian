@@ -1,0 +1,26 @@
+[package]
+name = "meridian-agents"
+description = "Meridian MCP agent gateway core: the Model Context Protocol wire types, the governed tool catalog, the QueryExecutor trait, and the agent-firewall decision model (Pillar H / H-F1, H-F2, H-F4)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The caller identity (Principal/PrincipalKind) and the shared error model.
+meridian-common = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# Stable argument digests for the activity ledger (redacted-args -> sha256).
+sha2 = { workspace = true }
+hex = { workspace = true }
+# The QueryExecutor trait is async.
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true
