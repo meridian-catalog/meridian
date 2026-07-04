@@ -505,6 +505,321 @@ impl PostgresCommitBackend {
             }),
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Branch-scoped commits (Pillar K, K-F1/K-F2). A branch commit moves a
+    // *branch* pointer (branch_table_pointers), never main's tables pointer,
+    // via the SAME lock → guard → CAS → audit → outbox sequence as
+    // `commit_tables`. There must be exactly one function per pointer kind that
+    // moves it; this is that function for branch pointers. See
+    // `docs/design/branching.md` §3 for the invariant-preservation argument.
+    // -----------------------------------------------------------------------
+
+    /// Loads the pointer a branch commit is built against: the branch's
+    /// diverged pointer if the table has diverged, else a fall-through to
+    /// main's live pointer. The returned `version` is the branch-local
+    /// `pointer_version` when diverged, or main's `pointer_version` when not
+    /// (the value the branch CAS will guard against as `expected_base`).
+    ///
+    /// `TableNotFound` when the table has neither a branch pointer nor a main
+    /// pointer (an uncommitted stage-create is not addressable on a branch).
+    pub async fn load_branch_pointer(
+        &self,
+        branch_id: &str,
+        table_id: &str,
+    ) -> Result<(TablePointer, bool), CommitBackendError> {
+        let branch: Option<(i64, String)> = sqlx::query_as(
+            "SELECT pointer_version, metadata_location
+             FROM branch_table_pointers WHERE branch_id = $1 AND table_id = $2",
+        )
+        .bind(branch_id)
+        .bind(table_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(unavailable)?;
+        if let Some((version, location)) = branch {
+            let version = u64::try_from(version).map_err(|_| CommitBackendError::Unavailable {
+                message: format!("branch pointer for {table_id} has a negative version"),
+            })?;
+            return Ok((
+                TablePointer {
+                    version,
+                    metadata_location: location,
+                },
+                true,
+            ));
+        }
+        // Fall through to main.
+        let pointer = self.load_pointer(&table_id.to_owned()).await?;
+        Ok((pointer, false))
+    }
+
+    /// Commits one table to a branch: the branch-pointer compare-and-set.
+    ///
+    /// - `expected_version`: for a **diverged** table, the branch pointer's
+    ///   current `pointer_version`; for a table diverging for the **first
+    ///   time**, main's current `pointer_version` (the base it is forking).
+    /// - `already_diverged`: which of the two the caller loaded (from
+    ///   [`Self::load_branch_pointer`]).
+    ///
+    /// The sequence mirrors [`Self::commit_tables`] exactly (design doc §3):
+    /// lock the base `tables` row `FOR UPDATE` (serializes first-divergence and
+    /// drop races) → in-transaction idempotency check → guard → CAS on
+    /// `branch_table_pointers` → audit row + outbox event (shared commit id) →
+    /// receipt → COMMIT. main's pointer is never in the write set.
+    #[allow(clippy::too_many_lines)]
+    pub async fn commit_branch_table(
+        &self,
+        branch_id: &str,
+        table_id: &str,
+        expected_version: u64,
+        already_diverged: bool,
+        new_metadata_location: &str,
+        idempotency: Option<(&str, &str)>,
+    ) -> Result<CommitReceipt<String>, CommitBackendError> {
+        let mut tx = self.pool.begin().await.map_err(unavailable)?;
+
+        // Lock the base table row: this serializes a first-divergence seed
+        // read, a concurrent main commit to the same table, and a drop.
+        let base_row: Option<(i64,)> =
+            sqlx::query_as("SELECT pointer_version FROM tables WHERE id = $1 FOR UPDATE")
+                .bind(table_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(unavailable)?;
+        let Some((main_version,)) = base_row else {
+            return Err(CommitBackendError::TableNotFound {
+                table: table_id.to_owned(),
+            });
+        };
+
+        // In-transaction idempotency check (§3 step 2), before guard.
+        if let Some((key, fingerprint)) = idempotency {
+            let recorded: Option<(String, Option<Json<Value>>)> = sqlx::query_as(
+                "SELECT request_hash, response_body FROM idempotency_keys
+                 WHERE workspace_id = $1 AND idempotency_key = $2 AND expires_at > now()",
+            )
+            .bind(self.workspace_id.to_string())
+            .bind(key)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(unavailable)?;
+            if let Some((recorded_fingerprint, body)) = recorded {
+                if recorded_fingerprint == fingerprint {
+                    let mut receipt =
+                        receipt_from_json(body.as_ref().map_or(&Value::Null, |b| &b.0))?;
+                    receipt.replayed = true;
+                    return Ok(receipt);
+                }
+                return Err(CommitBackendError::IdempotencyKeyReuse {
+                    key: key.to_owned(),
+                });
+            }
+        }
+
+        // Read the current branch pointer under the base-row lock.
+        let current_branch: Option<(i64, Option<String>)> = sqlx::query_as(
+            "SELECT pointer_version, metadata_location
+             FROM branch_table_pointers WHERE branch_id = $1 AND table_id = $2",
+        )
+        .bind(branch_id)
+        .bind(table_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(unavailable)?;
+
+        // Guard + CAS. Two shapes: advance an existing branch pointer, or seed
+        // the first divergence (INSERT). In both cases the guard is
+        // `expected_version`; a mismatch is a VersionConflict → rebase-retry.
+        let (new_version, previous_location) = if already_diverged {
+            let Some((actual, previous)) = current_branch else {
+                // The caller loaded a diverged pointer but the row vanished
+                // (a concurrent delete/merge). Retryable as a conflict.
+                return Err(CommitBackendError::VersionConflict {
+                    table: table_id.to_owned(),
+                    expected: expected_version,
+                    actual: 0,
+                });
+            };
+            let actual_u = u64::try_from(actual).map_err(|_| CommitBackendError::Unavailable {
+                message: format!("branch pointer for {table_id} has a negative version"),
+            })?;
+            if actual_u != expected_version {
+                return Err(CommitBackendError::VersionConflict {
+                    table: table_id.to_owned(),
+                    expected: expected_version,
+                    actual: actual_u,
+                });
+            }
+            let updated = sqlx::query(
+                "UPDATE branch_table_pointers
+                 SET pointer_version = pointer_version + 1,
+                     metadata_location = $1,
+                     previous_metadata_location = $2,
+                     updated_at = now()
+                 WHERE branch_id = $3 AND table_id = $4 AND pointer_version = $5",
+            )
+            .bind(new_metadata_location)
+            .bind(previous.as_deref())
+            .bind(branch_id)
+            .bind(table_id)
+            .bind(actual)
+            .execute(&mut *tx)
+            .await
+            .map_err(unavailable)?;
+            if updated.rows_affected() != 1 {
+                return Err(CommitBackendError::VersionConflict {
+                    table: table_id.to_owned(),
+                    expected: expected_version,
+                    actual: expected_version,
+                });
+            }
+            (expected_version + 1, previous)
+        } else {
+            // First divergence: main must still be at the base the caller
+            // forked (a concurrent main commit that moved past it is a
+            // conflict → rebase-retry rebuilds against the new main base).
+            let main_u =
+                u64::try_from(main_version).map_err(|_| CommitBackendError::Unavailable {
+                    message: format!("table {table_id} has a negative pointer version"),
+                })?;
+            if main_u != expected_version {
+                return Err(CommitBackendError::VersionConflict {
+                    table: table_id.to_owned(),
+                    expected: expected_version,
+                    actual: main_u,
+                });
+            }
+            // If a branch row somehow exists (racing first-divergence winner),
+            // this INSERT conflicts on the PK → surfaced as a conflict.
+            let inserted = sqlx::query(
+                "INSERT INTO branch_table_pointers
+                     (branch_id, table_id, metadata_location, pointer_version,
+                      base_pointer_version, previous_metadata_location)
+                 VALUES ($1, $2, $3, 0, $4, NULL)
+                 ON CONFLICT (branch_id, table_id) DO NOTHING",
+            )
+            .bind(branch_id)
+            .bind(table_id)
+            .bind(new_metadata_location)
+            .bind(main_version)
+            .execute(&mut *tx)
+            .await
+            .map_err(unavailable)?;
+            if inserted.rows_affected() != 1 {
+                return Err(CommitBackendError::VersionConflict {
+                    table: table_id.to_owned(),
+                    expected: expected_version,
+                    actual: expected_version,
+                });
+            }
+            (0, None)
+        };
+
+        let commit_id = Ulid::new().to_string();
+        let details = json!({
+            "commit_id": commit_id,
+            "branch_id": branch_id,
+            "pointer_version": new_version,
+            "metadata_location": new_metadata_location,
+            "previous_metadata_location": previous_location,
+        });
+        outbox::enqueue(
+            &mut *tx,
+            &NewOutboxEvent {
+                workspace_id: Some(self.workspace_id),
+                aggregate: format!("branch:{branch_id}/table:{table_id}"),
+                event_type: "table.branch_committed".to_owned(),
+                payload: details.clone(),
+            },
+        )
+        .await
+        .map_err(meridian_to_backend)?;
+        audit::append_in_tx(
+            &mut tx,
+            NewAuditEntry {
+                workspace_id: Some(self.workspace_id),
+                principal: self.principal.clone(),
+                action: "table.branch_commit".to_owned(),
+                resource: format!("branch:{branch_id}/table:{table_id}"),
+                details,
+            },
+        )
+        .await
+        .map_err(meridian_to_backend)?;
+
+        let receipt = CommitReceipt {
+            tables: vec![CommittedTable {
+                table: table_id.to_owned(),
+                version: new_version,
+                metadata_location: new_metadata_location.to_owned(),
+            }],
+            replayed: false,
+        };
+
+        if let Some((key, fingerprint)) = idempotency {
+            let insert = sqlx::query(
+                "INSERT INTO idempotency_keys
+                     (workspace_id, idempotency_key, request_hash, response_status,
+                      response_body, expires_at)
+                 VALUES ($1, $2, $3, 200, $4, now() + make_interval(hours => $5))",
+            )
+            .bind(self.workspace_id.to_string())
+            .bind(key)
+            .bind(fingerprint)
+            .bind(Json(receipt_to_json(&receipt)))
+            .bind(RECEIPT_TTL_HOURS)
+            .execute(&mut *tx)
+            .await;
+            if let Err(error) = insert {
+                let unique = error
+                    .as_database_error()
+                    .is_some_and(sqlx::error::DatabaseError::is_unique_violation);
+                if let Err(rollback_error) = tx.rollback().await {
+                    tracing::warn!(%rollback_error, "rollback after branch receipt conflict failed");
+                }
+                if unique {
+                    return self.resolve_key_race(key, fingerprint).await;
+                }
+                return Err(unavailable(error));
+            }
+        }
+
+        tx.commit()
+            .await
+            .map_err(|error| CommitBackendError::StateUnknown {
+                message: format!("branch transaction commit failed: {error}"),
+            })?;
+
+        Ok(receipt)
+    }
+
+    /// Fast-forwards main from a branch head for one table, **through main's
+    /// own CAS** (the merge apply step, branching.md §6). This is an ordinary
+    /// main commit whose new metadata is the branch's head file; it carries
+    /// every main invariant. `expected_main_version` is main's current pointer
+    /// version (the merge-base check already confirmed main has not advanced
+    /// past the divergence base; a concurrent main commit that lands here makes
+    /// the guard fail → the caller reports a newly-conflicting table rather
+    /// than clobbering).
+    pub async fn fast_forward_main(
+        &self,
+        table_id: &str,
+        expected_main_version: u64,
+        branch_metadata_location: &str,
+        derived: DerivedTableState,
+    ) -> Result<CommitReceipt<String>, CommitBackendError> {
+        let op = CommitTableOp {
+            cas: PointerCas {
+                table: table_id.to_owned(),
+                expected_version: expected_main_version,
+                new_metadata_location: branch_metadata_location.to_owned(),
+            },
+            derived: Some(derived),
+            contract_violation: None,
+        };
+        self.commit_tables(std::slice::from_ref(&op), None).await
+    }
 }
 
 impl CommitBackend for PostgresCommitBackend {
