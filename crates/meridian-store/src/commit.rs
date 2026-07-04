@@ -98,6 +98,14 @@ pub struct CommitTableOp {
     pub cas: PointerCas<String>,
     /// Write-through index state derived from the new metadata.
     pub derived: Option<DerivedTableState>,
+    /// A contract violation to record **atomically with this pointer swap**
+    /// (Pillar E, E-F4). Set by the commit-path pre-commit hook in warn and
+    /// quarantine modes — the violation row(s) + event join this transaction,
+    /// so they are durable iff the commit is (commit-protocol I4). `None` for
+    /// an ordinary commit and for the pure-CAS trait path. Block-mode
+    /// violations are *not* carried here: a blocked commit never opens this
+    /// transaction, so its record is written separately.
+    pub contract_violation: Option<crate::contracts::OwnedViolationRecord>,
 }
 
 /// An idempotency receipt ready to record in a commit transaction.
@@ -407,6 +415,19 @@ impl PostgresCommitBackend {
             )
             .await
             .map_err(meridian_to_backend)?;
+
+            // Contract violation (warn / quarantine), recorded atomically with
+            // this pointer swap (Pillar E, E-F4). Durable iff the commit is —
+            // the same guarantee the audit row above carries (I4).
+            if let Some(violation) = &op.contract_violation {
+                crate::contracts::record_violation_in_tx(
+                    &mut tx,
+                    self.workspace_id,
+                    &violation.as_ref(),
+                )
+                .await
+                .map_err(meridian_to_backend)?;
+            }
         }
 
         let receipt = CommitReceipt {
@@ -532,6 +553,7 @@ impl CommitBackend for PostgresCommitBackend {
             .map(|cas| CommitTableOp {
                 cas: cas.clone(),
                 derived: None,
+                contract_violation: None,
             })
             .collect();
         // The trait carries no request identity, so the fingerprint is the
@@ -708,6 +730,7 @@ mod tests {
                 new_metadata_location: format!("s3://b/{table}/m.json"),
             },
             derived: None,
+            contract_violation: None,
         };
         let a = ops_fingerprint(&[op("t1", 1), op("t2", 2)]);
         assert_eq!(a, ops_fingerprint(&[op("t1", 1), op("t2", 2)]));

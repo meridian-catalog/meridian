@@ -80,6 +80,7 @@ use meridian_storage::{Storage, StorageError, new_metadata_location, read_table_
 use meridian_store::commit::{
     CommitTableOp, DerivedTableState, PostgresCommitBackend, ReceiptToRecord, SnapshotIndexRow,
 };
+use meridian_store::contracts;
 use meridian_store::rbac::{Privilege, SecurableScope};
 use meridian_store::warehouse::WarehouseRecord;
 use meridian_store::{audit, namespace, table, tenancy};
@@ -1448,7 +1449,7 @@ pub async fn commit_table(
             &state.pool,
             &principal,
             Privilege::Commit,
-            &SecurableScope::table(&warehouse.id, chain, Some(&existing.id)),
+            &SecurableScope::table(&warehouse.id, chain.clone(), Some(&existing.id)),
         )
         .await?;
         // Foreign (mirrored) tables are read-only: the external catalog is the
@@ -1462,7 +1463,7 @@ pub async fn commit_table(
             &state.pool,
             &principal,
             Privilege::CreateTable,
-            &SecurableScope::namespace(&warehouse.id, chain),
+            &SecurableScope::namespace(&warehouse.id, chain.clone()),
         )
         .await?;
         // A commit that would create a table under a mirror's foreign warehouse
@@ -1484,7 +1485,19 @@ pub async fn commit_table(
     let idem = key.as_deref().map(|k| (k, fingerprint.as_str()));
 
     match record {
-        Some(record) => commit_existing_table(&backend, &storage, &record, &parsed, idem).await,
+        Some(record) => {
+            commit_existing_table(
+                &state,
+                &backend,
+                &storage,
+                &record,
+                &chain,
+                &principal.audit_string(),
+                &parsed,
+                idem,
+            )
+            .await
+        }
         None => {
             // A commit against a missing table is only meaningful as the
             // finalization of a create transaction (assert-create).
@@ -1559,6 +1572,280 @@ async fn replay_response(
 struct PreparedTable {
     op: CommitTableOp,
     metadata: TableMetadata,
+    /// The base metadata the candidate was built on (the current-pointer
+    /// metadata). Retained so the pre-commit contract hook can classify the
+    /// staged schema against it without a second load.
+    base: TableMetadata,
+}
+
+// ---------------------------------------------------------------------------
+// The circuit breaker — pre-commit contract hook (Pillar E, E-F4)
+//
+// `commit-protocol.md` §3 step 6 names this exact insertion point. The hook
+// runs after the candidate is built and staged, before the pointer CAS; its
+// decision either lets the commit proceed (allow / warn / quarantine, the
+// latter two carrying a violation record written atomically with the swap) or
+// rejects it (block). Full semantics + the invariant-preservation argument:
+// `docs/design/contracts-circuit-breaker.md`.
+// ---------------------------------------------------------------------------
+
+/// The outcome of evaluating all contracts bound to a table for one commit.
+enum ContractDecision {
+    /// No enabled contract was violated: proceed unchanged.
+    Allow,
+    /// Warn mode: the commit lands; the record is written with the swap.
+    Warn(contracts::OwnedViolationRecord),
+    /// Quarantine mode: the candidate is retargeted onto the named audit branch
+    /// (`main` frozen); the record is written with the swap.
+    Quarantine(contracts::OwnedViolationRecord, String),
+    /// Block mode: reject. Carries the violated contract's identity + the
+    /// violations for the machine-readable 409 body and the standalone record.
+    Block(BlockedCommit),
+}
+
+/// A blocked commit's detail: everything the 409 body and the violation record
+/// need.
+struct BlockedCommit {
+    contract_id: String,
+    contract_name: String,
+    mode: contracts::EnforcementMode,
+    violations: Vec<contracts::Violation>,
+}
+
+/// Evaluates every enabled contract bound to `table_id` (directly or via its
+/// namespace chain) against the staged candidate, and decides what the circuit
+/// breaker does. Pure of side effects except the contract *resolution* read;
+/// the classification itself is a pure CPU function (no data-file I/O).
+///
+/// Precedence when several contracts apply and are violated: **block wins over
+/// quarantine wins over warn** — the strictest violated mode decides the
+/// commit's fate, and its violations are the ones surfaced. (All violated
+/// contracts still get a violation *record*; precedence only picks the
+/// commit-fate + the machine body.)
+///
+/// `head_snapshot` is the candidate's current snapshot id (for the record) and
+/// `summary` its summary (for predicates); both `None` for a schema-only
+/// commit that adds no snapshot.
+async fn decide_contracts(
+    state: &AppState,
+    table_id: &str,
+    namespace_ids: &[String],
+    base: &TableMetadata,
+    candidate: &TableMetadata,
+) -> Result<ContractDecision, ApiError> {
+    let contracts_for_table = contracts::resolve_for_table(
+        &state.pool,
+        tenancy::default_workspace_id(),
+        table_id,
+        namespace_ids,
+    )
+    .await
+    .map_err(ApiError::from)?;
+    if contracts_for_table.is_empty() {
+        return Ok(ContractDecision::Allow);
+    }
+
+    // The schemas to compare. A commit with no current schema (should not
+    // happen for a live table) can't be classified — treat as allow (there is
+    // nothing to evolve against).
+    let (Some(base_schema), Some(staged_schema)) =
+        (base.current_schema(), candidate.current_schema())
+    else {
+        return Ok(ContractDecision::Allow);
+    };
+    let head_snapshot = candidate.current_snapshot_id.filter(|id| *id >= 0);
+    let summary = candidate
+        .current_snapshot()
+        .and_then(|s| s.summary.as_ref());
+
+    // Evaluate every contract; keep the strictest violated mode as the fate.
+    // The strictest violated mode decides the commit's fate; that contract's
+    // own violations are what we surface and record (so a recorded violation is
+    // always attributed to the contract it came from). When several contracts
+    // of equal severity are violated on one commit — rare — the first in id
+    // order wins the fate; recording each violated contract separately is a
+    // tracked refinement, not needed for the correctness bar.
+    let mut fate: Option<(
+        contracts::EnforcementMode,
+        contracts::Contract,
+        Vec<contracts::Violation>,
+    )> = None;
+
+    for contract in &contracts_for_table {
+        let violations = contract.spec.evaluate(base_schema, staged_schema, summary);
+        if violations.is_empty() {
+            continue;
+        }
+        let stricter = |a: contracts::EnforcementMode, b: contracts::EnforcementMode| {
+            // block > quarantine > warn
+            let rank = |m: contracts::EnforcementMode| match m {
+                contracts::EnforcementMode::Warn => 0,
+                contracts::EnforcementMode::Quarantine => 1,
+                contracts::EnforcementMode::Block => 2,
+            };
+            if rank(a) >= rank(b) { a } else { b }
+        };
+        match &mut fate {
+            None => fate = Some((contract.mode, contract.clone(), violations)),
+            Some((mode, chosen, chosen_violations)) => {
+                let winner = stricter(*mode, contract.mode);
+                if winner != *mode {
+                    *mode = winner;
+                    *chosen = contract.clone();
+                    *chosen_violations = violations;
+                }
+            }
+        }
+    }
+
+    let Some((mode, contract, violations)) = fate else {
+        return Ok(ContractDecision::Allow);
+    };
+
+    match mode {
+        contracts::EnforcementMode::Block => Ok(ContractDecision::Block(BlockedCommit {
+            contract_id: contract.id.clone(),
+            contract_name: contract.name.clone(),
+            mode,
+            violations,
+        })),
+        contracts::EnforcementMode::Warn => {
+            Ok(ContractDecision::Warn(contracts::OwnedViolationRecord {
+                contract_id: contract.id.clone(),
+                contract_name: contract.name.clone(),
+                table_id: table_id.to_owned(),
+                snapshot_id: head_snapshot,
+                mode,
+                outcome: contracts::ViolationOutcome::Warned,
+                violations,
+            }))
+        }
+        contracts::EnforcementMode::Quarantine => Ok(ContractDecision::Quarantine(
+            contracts::OwnedViolationRecord {
+                contract_id: contract.id.clone(),
+                contract_name: contract.name.clone(),
+                table_id: table_id.to_owned(),
+                snapshot_id: head_snapshot,
+                mode,
+                outcome: contracts::ViolationOutcome::Quarantined,
+                violations,
+            },
+            contract.quarantine_branch.clone(),
+        )),
+    }
+}
+
+/// Renders a blocked commit as a `409 CommitFailedException` whose envelope
+/// carries a machine-readable `contract-violation` object (design doc §5). Built
+/// locally so the shared `ErrorBody` stays a fixed 3-field shape; this is the
+/// one response that needs the richer body.
+fn blocked_commit_response(table_id: &str, blocked: &BlockedCommit) -> Response {
+    let first = blocked
+        .violations
+        .first()
+        .map_or("contract violated", |v| v.detail.as_str());
+    let message = format!(
+        "commit blocked by data contract {:?}: {first}",
+        blocked.contract_name
+    );
+    let body = json!({
+        "error": {
+            "message": message,
+            "type": "CommitFailedException",
+            "code": 409,
+            "contract-violation": {
+                "contract-id": blocked.contract_id,
+                "contract-name": blocked.contract_name,
+                "mode": blocked.mode.as_str(),
+                "table": table_id,
+                "violations": blocked.violations,
+            },
+        }
+    });
+    (StatusCode::CONFLICT, Json(body)).into_response()
+}
+
+/// Records a block-mode violation in its own transaction (the commit was
+/// rejected, so there is no commit transaction to join), then returns the
+/// machine-readable 409. Recording failure is logged but never masks the block
+/// — the contract still rejects the commit.
+async fn reject_blocked_commit(
+    state: &AppState,
+    principal: &str,
+    table_id: &str,
+    snapshot_id: Option<i64>,
+    blocked: BlockedCommit,
+) -> Response {
+    let record = contracts::ViolationRecord {
+        contract_id: &blocked.contract_id,
+        contract_name: &blocked.contract_name,
+        table_id,
+        snapshot_id,
+        mode: blocked.mode,
+        outcome: contracts::ViolationOutcome::Blocked,
+        violations: &blocked.violations,
+    };
+    if let Err(error) = contracts::record_violation(
+        &state.pool,
+        tenancy::default_workspace_id(),
+        principal,
+        &record,
+    )
+    .await
+    {
+        tracing::error!(%error, contract = %blocked.contract_id, table = %table_id,
+            "failed to record blocked-commit violation (the commit is still blocked)");
+    }
+    blocked_commit_response(table_id, &blocked)
+}
+
+/// Retargets a prepared commit onto its quarantine branch: rewrites the
+/// candidate metadata so `main` is frozen (design doc §3.3), re-stages the
+/// retargeted file, and discards the original staged file. Returns the
+/// retargeted `PreparedTable` on success, or `None` when the candidate added no
+/// snapshot (a schema-only violation cannot be quarantined — the caller
+/// degrades to block).
+async fn retarget_for_quarantine(
+    storage: &Arc<dyn Storage>,
+    mut prepared: PreparedTable,
+    branch: &str,
+) -> Result<Option<PreparedTable>, ApiError> {
+    let base = prepared.base.clone();
+    // The head snapshot id the retarget parks on the branch is already carried
+    // by the violation record's snapshot_id; we only need to know whether a
+    // retarget happened (a schema-only candidate returns None → degrade).
+    if prepared
+        .metadata
+        .quarantine_retarget(&base, branch)
+        .is_none()
+    {
+        return Ok(None);
+    }
+
+    // Re-stage the retargeted metadata under a fresh unique name; discard the
+    // original staged candidate (it advanced main — it must never be the
+    // pointer target).
+    let old_staged = prepared.op.cas.new_metadata_location.clone();
+    let restaged = new_metadata_location(
+        &prepared.metadata.location,
+        prepared.op.cas.expected_version + 1,
+        Uuid::new_v4(),
+    );
+    if let Err(error) =
+        meridian_storage::write_table_metadata(storage.as_ref(), &restaged, &prepared.metadata)
+            .await
+    {
+        // The retargeted file failed to stage; the original staged candidate is
+        // now an orphan (we are abandoning this attempt). Clean it best-effort,
+        // exactly as the caller would on any other non-committed outcome (§7.1).
+        discard_staged(storage, &old_staged).await;
+        return Err(storage_to_api(&error));
+    }
+    discard_staged(storage, &old_staged).await;
+
+    prepared.op.cas.new_metadata_location = restaged;
+    prepared.op.derived = Some(derived_state(&prepared.metadata));
+    Ok(Some(prepared))
 }
 
 /// Requirement violations are collected (not first-only) so multi-table
@@ -1629,22 +1916,34 @@ async fn prepare_table_commit(
                 new_metadata_location: staged_location,
             },
             derived: Some(derived_state(&candidate)),
+            contract_violation: None,
         },
         metadata: candidate,
+        base,
     })
 }
 
 /// The single-table commit loop (design doc §6): bounded rebase-retry on a
-/// lost compare-and-set, requirement re-check per attempt.
+/// lost compare-and-set, requirement re-check per attempt. The pre-commit
+/// contract hook (Pillar E, E-F4) runs each attempt after the candidate is
+/// staged and before the CAS: it may block the commit (409), attach a warn
+/// record, or retarget the candidate onto the quarantine branch.
+// One call site; the args are the commit context (state, backend, storage,
+// the table + its namespace chain, the acting principal, the parsed request,
+// and the idempotency tuple) — a struct would only rename them.
+#[allow(clippy::too_many_arguments)]
 async fn commit_existing_table(
+    state: &AppState,
     backend: &PostgresCommitBackend,
     storage: &Arc<dyn Storage>,
     record: &table::TableRecord,
+    namespace_ids: &[String],
+    principal: &str,
     parsed: &ParsedCommit,
     idempotency: Option<(&str, &str)>,
 ) -> Result<Response, ApiError> {
     for _attempt in 1..=MAX_COMMIT_ATTEMPTS {
-        let prepared = prepare_table_commit(
+        let mut prepared = prepare_table_commit(
             backend,
             storage,
             record,
@@ -1653,6 +1952,56 @@ async fn commit_existing_table(
             &record.name,
         )
         .await?;
+
+        // The circuit breaker: evaluate contracts against the staged candidate.
+        match decide_contracts(
+            state,
+            &record.id,
+            namespace_ids,
+            &prepared.base,
+            &prepared.metadata,
+        )
+        .await?
+        {
+            ContractDecision::Allow => {}
+            ContractDecision::Warn(record_) => {
+                prepared.op.contract_violation = Some(record_);
+            }
+            ContractDecision::Quarantine(record_, branch) => {
+                let branch_snapshot = record_.snapshot_id;
+                let Some(mut retargeted) =
+                    retarget_for_quarantine(storage, prepared, &branch).await?
+                else {
+                    // Schema-only violation: quarantine has no snapshot to
+                    // retarget, so it degrades to block (fail-closed).
+                    let blocked = BlockedCommit {
+                        contract_id: record_.contract_id,
+                        contract_name: record_.contract_name,
+                        mode: contracts::EnforcementMode::Block,
+                        violations: record_.violations,
+                    };
+                    return Ok(reject_blocked_commit(
+                        state,
+                        principal,
+                        &record.id,
+                        branch_snapshot,
+                        blocked,
+                    )
+                    .await);
+                };
+                retargeted.op.contract_violation = Some(record_);
+                prepared = retargeted;
+            }
+            ContractDecision::Block(blocked) => {
+                let snapshot = prepared.metadata.current_snapshot_id.filter(|id| *id >= 0);
+                // The staged candidate never becomes durable — discard it.
+                discard_staged(storage, &prepared.op.cas.new_metadata_location).await;
+                return Ok(
+                    reject_blocked_commit(state, principal, &record.id, snapshot, blocked).await,
+                );
+            }
+        }
+
         let staged_location = prepared.op.cas.new_metadata_location.clone();
 
         match backend
@@ -1899,7 +2248,9 @@ pub async fn commit_transaction(
 
     // COMMIT on every table, before the idempotency recall (an
     // unauthorized caller must not learn a receipt exists) and before any
-    // staging I/O.
+    // staging I/O. The per-table namespace chains are retained for the
+    // contract hook below (contracts bind to a table or its namespaces).
+    let mut chains: Vec<Vec<String>> = Vec::with_capacity(records.len());
     for (identifier, record) in changes.iter().map(|(i, _)| i).zip(&records) {
         let chain =
             namespace_scope_chain(&state.pool, &warehouse.id, &identifier.namespace).await?;
@@ -1907,13 +2258,14 @@ pub async fn commit_transaction(
             &state.pool,
             &principal,
             Privilege::Commit,
-            &SecurableScope::table(&warehouse.id, chain, Some(&record.id)),
+            &SecurableScope::table(&warehouse.id, chain.clone(), Some(&record.id)),
         )
         .await?;
         // A transaction touching any foreign (read-only) table is rejected as a
         // whole, before staging — the external catalog owns those tables
         // (Pillar B, B-F1).
         reject_if_foreign(record, &identifier.namespace, &identifier.name)?;
+        chains.push(chain);
     }
 
     let key = idempotency_key(&headers)?;
@@ -1962,8 +2314,11 @@ pub async fn commit_transaction(
         let mut ops: Vec<CommitTableOp> = Vec::with_capacity(changes.len());
         let mut staged: Vec<String> = Vec::with_capacity(changes.len());
         let mut stage_failure: Option<ApiError> = None;
-        for ((_, parsed), (record, (pointer, base))) in
-            changes.iter().zip(records.iter().zip(bases))
+        // A block on any table rejects the whole transaction atomically (I2):
+        // set on the first block, then unwind the staged files and 409.
+        let mut blocked: Option<(String, Option<i64>, BlockedCommit)> = None;
+        for (index, ((_, parsed), (record, (pointer, base)))) in
+            changes.iter().zip(records.iter().zip(bases)).enumerate()
         {
             let mut builder = base.builder_from();
             let build_result = builder
@@ -1981,6 +2336,41 @@ pub async fn commit_transaction(
                     break;
                 }
             };
+
+            // The circuit breaker, per table. In a multi-table transaction a
+            // quarantine degrades to block (design doc §3.3: retargeting one
+            // table of an atomic set would break the producer's atomicity), and
+            // any block rejects the whole transaction (I2).
+            let contract_violation =
+                match decide_contracts(&state, &record.id, &chains[index], &base, &candidate).await
+                {
+                    Ok(ContractDecision::Allow) => None,
+                    Ok(ContractDecision::Warn(rec)) => Some(rec),
+                    Ok(ContractDecision::Quarantine(rec, _branch)) => {
+                        // Degrade to block.
+                        blocked = Some((
+                            record.id.clone(),
+                            rec.snapshot_id,
+                            BlockedCommit {
+                                contract_id: rec.contract_id,
+                                contract_name: rec.contract_name,
+                                mode: contracts::EnforcementMode::Block,
+                                violations: rec.violations,
+                            },
+                        ));
+                        break;
+                    }
+                    Ok(ContractDecision::Block(b)) => {
+                        let snapshot = candidate.current_snapshot_id.filter(|id| *id >= 0);
+                        blocked = Some((record.id.clone(), snapshot, b));
+                        break;
+                    }
+                    Err(error) => {
+                        stage_failure = Some(error);
+                        break;
+                    }
+                };
+
             let staged_location =
                 new_metadata_location(&candidate.location, pointer.version + 1, Uuid::new_v4());
             if let Err(error) = meridian_storage::write_table_metadata(
@@ -2001,7 +2391,23 @@ pub async fn commit_transaction(
                     new_metadata_location: staged_location,
                 },
                 derived: Some(derived_state(&candidate)),
+                contract_violation,
             });
+        }
+        // A block unwinds every staged file of this attempt (nothing commits —
+        // I2) and returns the machine-readable 409.
+        if let Some((table_id, snapshot, blocked)) = blocked {
+            for location in &staged {
+                discard_staged(&storage, location).await;
+            }
+            return Ok(reject_blocked_commit(
+                &state,
+                &principal.audit_string(),
+                &table_id,
+                snapshot,
+                blocked,
+            )
+            .await);
         }
         if let Some(error) = stage_failure {
             for location in &staged {
