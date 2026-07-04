@@ -152,6 +152,21 @@ pub async fn get(pool: &PgPool, namespace_id: &str, name: &str) -> Result<Option
     .map_err(|e| map_sqlx_error("failed to load table", e))
 }
 
+/// Loads a table by its internal id.
+///
+/// Returns `None` when no table with that id exists. Used where a caller holds
+/// an internal table id (e.g. a semantics/product binding, a lineage node, an
+/// agent-query provenance record) and needs the table row.
+pub async fn get_by_id(pool: &PgPool, id: &str) -> Result<Option<TableRecord>> {
+    sqlx::query_as(&format!(
+        "SELECT {SELECT_COLUMNS} FROM tables WHERE id = $1"
+    ))
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| map_sqlx_error("failed to load table by id", e))
+}
+
 /// Loads a table by warehouse, namespace levels, and name in one query.
 ///
 /// Returns `None` when either the namespace or the table does not exist;

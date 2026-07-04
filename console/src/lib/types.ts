@@ -849,3 +849,244 @@ export const MONITOR_KINDS = [
 ] as const;
 
 export const MONITOR_SEVERITIES = ["low", "medium", "high"] as const;
+
+// ---------------------------------------------------------------------------
+// Semantics (Pillar G): metrics (G-F2), glossary (G-F3), data products (G-F4),
+// and universal-view transpile status (G-F1). Shapes checked against
+// crates/meridian-server/src/routes/semantics.rs and views.rs.
+// ---------------------------------------------------------------------------
+
+export type Certification = "draft" | "certified" | "deprecated";
+
+export const CERTIFICATIONS = ["draft", "certified", "deprecated"] as const;
+
+export interface Metric {
+  id: string;
+  name: string;
+  display_name?: string | null;
+  source: string;
+  expression: string;
+  dialect: string;
+  dimensions: string[];
+  filters: string[];
+  grain?: string | null;
+  description?: string | null;
+  owner?: string | null;
+  certification: Certification;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ListMetricsResponse {
+  metrics: Metric[];
+  next?: string | null;
+}
+
+export interface CreateMetricRequest {
+  name: string;
+  source: string;
+  expression: string;
+  dialect?: string;
+  dimensions?: string[];
+  filters?: string[];
+  grain?: string;
+  description?: string;
+  certification?: Certification;
+}
+
+export interface CompileMetricResponse {
+  metric: string;
+  engine: string;
+  sql: string | null;
+  status: "verified" | "best_effort" | "unsupported";
+  diagnostics: TranspileDiagnostic[];
+}
+
+export interface GlossaryLink {
+  id: string;
+  term_id: string;
+  asset_kind: string;
+  asset_ref: string;
+  created_at: string;
+}
+
+export interface GlossaryTerm {
+  id: string;
+  name: string;
+  definition: string;
+  steward?: string | null;
+  certification: Certification;
+  created_at: string;
+  updated_at: string;
+  links?: GlossaryLink[];
+}
+
+export interface ListTermsResponse {
+  terms: GlossaryTerm[];
+  next?: string | null;
+}
+
+export interface CreateTermRequest {
+  name: string;
+  definition: string;
+  certification?: Certification;
+}
+
+export interface DataProductMember {
+  id: string;
+  product_id: string;
+  member_kind: string;
+  member_ref: string;
+  created_at: string;
+}
+
+export interface DataProduct {
+  id: string;
+  name: string;
+  display_name?: string | null;
+  description?: string | null;
+  owner?: string | null;
+  sla?: string | null;
+  certification: Certification;
+  created_at: string;
+  updated_at: string;
+  members?: DataProductMember[];
+}
+
+export interface ListProductsResponse {
+  products: DataProduct[];
+  next?: string | null;
+}
+
+export interface CreateProductRequest {
+  name: string;
+  description?: string;
+  sla?: string;
+  certification?: Certification;
+}
+
+export interface ProductStatusResponse {
+  product: DataProduct;
+  member_counts: Record<string, number>;
+  member_total: number;
+  health_rollup: "healthy" | "degraded" | "unhealthy" | "no_signal";
+  table_statuses: Array<{ member_ref: string; resolved: Record<string, unknown> }>;
+}
+
+export interface TranspileDiagnostic {
+  severity: string;
+  code: string;
+  message: string;
+}
+
+export interface TranspileResponse {
+  sql: string | null;
+  status: "verified" | "best_effort" | "unsupported";
+  from_dialect: string;
+  to_dialect: string;
+  diagnostics: TranspileDiagnostic[];
+}
+
+export const SQL_DIALECTS = [
+  "spark",
+  "trino",
+  "snowflake",
+  "duckdb",
+  "clickhouse",
+  "starrocks",
+  "bigquery",
+  "postgres",
+] as const;
+
+// ---------------------------------------------------------------------------
+// Workbench (Pillar L, L-F1/L-F3): /api/v2/workbench
+// ---------------------------------------------------------------------------
+
+/** One result column (name + Arrow/SQL type label). */
+export interface WorkbenchColumn {
+  name: string;
+  data_type: string;
+}
+
+/** One table + snapshot a query read, for citation. */
+export interface WorkbenchProvenanceTable {
+  name: string;
+  table_id: string | null;
+  table_uuid: string;
+  snapshot_id: number | null;
+}
+
+/** Provenance of a workbench query result. */
+export interface WorkbenchProvenance {
+  tables: WorkbenchProvenanceTable[];
+  row_filter_policies: string[];
+  column_mask_policies: string[];
+  masked_columns: string[];
+}
+
+/** The result of running a workbench query. */
+export interface WorkbenchQueryResponse {
+  columns: WorkbenchColumn[];
+  rows: Record<string, unknown>[];
+  row_count: number;
+  truncated: boolean;
+  provenance: WorkbenchProvenance;
+  bytes_scanned: number;
+  duration_ms: number;
+}
+
+/** One recorded query in the caller's history. */
+export interface WorkbenchHistoryEntry {
+  id: string;
+  sql: string;
+  warehouse: string | null;
+  status: "ok" | "error" | "denied";
+  row_count: number | null;
+  bytes_scanned: number | null;
+  duration_ms: number | null;
+  message: string | null;
+  created_at: string;
+}
+
+export interface WorkbenchHistoryResponse {
+  history: WorkbenchHistoryEntry[];
+  next: string | null;
+}
+
+/** A named, reusable saved query. */
+export interface SavedQuery {
+  id: string;
+  name: string;
+  sql: string;
+  warehouse: string | null;
+  namespace: string[];
+  description: string | null;
+  owner: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ListSavedQueriesResponse {
+  saved_queries: SavedQuery[];
+}
+
+export interface SaveQueryRequest {
+  name: string;
+  sql: string;
+  warehouse?: string;
+  namespace?: string;
+  description?: string;
+}
+
+/** The notebook-handoff snippet bundle (L-F3). */
+export interface SnippetResponse {
+  table: string;
+  catalog_uri: string;
+  warehouse: string;
+  note: string;
+  snippets: {
+    pyiceberg: string;
+    daft: string;
+    pandas: string;
+  };
+}

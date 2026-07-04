@@ -12,6 +12,150 @@ releases begin, the project will adhere to
 
 ### Added
 
+- **Governed agent queries + the SQL workbench — the built-in executor, wired**
+  (Pillar H `run_sql` H-F3, Pillar L workbench L-F1/L-F3). The MCP agent
+  gateway's query tools now **run** on the built-in `DataFusion` small-scan
+  executor (ADR 010), not a stub. `run_sql` and `preview_table` plan a query
+  through one governed path (`crate::mcp::engine`): the SQL's referenced tables
+  are enumerated with the executor's *own* parser (so the resolved set is exactly
+  what it binds — no drift), each is RBAC-READ-checked and ABAC-resolved for the
+  calling agent, masked columns are **dropped** (H-F2: a restricted column is
+  absent from results, never nulled), the scan is **priced from manifest stats
+  and the agent's budget checked *before* any I/O** (an oversized scan or an
+  over-budget query is a graceful, relayable refusal that names the escape
+  hatch), and every result carries **provenance** — the tables and snapshot ids
+  read and the policies applied — so an agent can cite and the audit chain
+  answers "which agent read which columns under which policy". `query_metrics`
+  returns an honest "semantic layer not populated" answer until metric
+  definitions land (Pillar G). Every call remains on the tamper-evident
+  agent-activity chain.
+
+  The **SQL workbench** (`POST /api/v2/workbench/query` + saved queries +
+  per-principal history) is a second caller of the same governed path — so a
+  human at the workbench and an agent can never be governed differently — with
+  one deliberate difference: the workbench keeps **value-preserving** masks
+  (`hash`, partial, NULL — the column stays, the value is hidden), where the
+  agent path drops. Big scans route to a registered engine or are refused with
+  guidance (a small-scan wedge, not a BI suite). The **notebook handoff** (L-F3,
+  `POST /api/v2/workbench/snippet`) generates one-click "open in
+  PyIceberg/Daft/Pandas" connection snippets that obtain scoped, vended
+  credentials at connect time via the standard IRC flow — no secret is ever
+  embedded. A console **Workbench** page ties it together: a SQL editor over
+  governed assets, a results table with the provenance line, saved queries, and
+  history — all real `/api/v2` data. New migration `0022_workbench`; design in
+  `docs/design/workbench.md` and the updated `docs/design/agent-gateway.md`.
+
+- **Semantics & universal views — meaning next to the data** (Pillar G,
+  G-F1 / G-F2 / G-F3 / G-F4). **Universal views (G-F1)** close the five-year-old
+  cross-engine view bug: on `loadView`, Meridian serves the SQL representation
+  matching the *requesting engine's* dialect — identified from an explicit
+  `?engine=` override or the `User-Agent` (a `Trino JDBC Driver` request gets
+  Trino; an unrecognized client gets the view as authored, never a guessed
+  dialect). When the view does not already carry that dialect, Meridian
+  transpiles its canonical representation via the SQLGlot sidecar, folds the
+  result into the served metadata (dialect-tagged, carrying a
+  `meridian.transpile-status`), reports the honest status
+  (`verified` / `best_effort` / `unsupported`, validated by parse-back), and
+  **caches** it in a side table keyed by the view + a hash of the source SQL — so
+  the next load is instant, without churning the Iceberg pointer version (which
+  would break optimistic view committers). A sidecar outage degrades gracefully
+  to the canonical representation with a status note — never a 500. Also exposed
+  standalone at `POST /api/v2/sql/transpile` (a migration tool and demo magnet).
+  **Metrics & semantic models (G-F2)** are first-class objects — measure,
+  dimensions, filters, grain, owner, certification — that compile
+  **deterministically** to any engine's SQL via the sidecar (`SELECT … GROUP BY …`
+  built with SQLGlot's expression builder, never string-concatenated; no LLM ever
+  consulted), served to BI over `/api/v2/metrics/{id}/compile` and to agents over
+  MCP (`list_metrics` / `get_metric_definition`). **The business glossary (G-F3)**
+  adds stewarded terms with definitions and certification, linked many-to-many to
+  tables/views/metrics by stable reference (rename-surviving), served to agents as
+  `get_glossary_term`. **Certified data products (G-F4)** are named bundles
+  (tables + views + metrics + glossary terms + contracts) with an owner, a
+  free-text SLA, a certification status, and a **product-level status page** that
+  rolls up member-table quality/trust (reusing the E-F5 quality surface) into a
+  health verdict. All semantics mutations are management-gated and write their
+  audit + outbox row on the same transaction. The SQLGlot transpilation sidecar's
+  `compile_metric` endpoint is now fully implemented (was a wave-1 stub). New
+  migration `0021_semantics.sql`; store module `meridian-store/src/semantics.rs`;
+  server `routes/semantics.rs` + universal-view path in `routes/views.rs` + the
+  Rust sidecar client `src/sidecar.rs`; CLI `meridian metric` / `glossary` /
+  `product` / `transpile`; a console **Semantics** page (metrics, glossary,
+  products, and a live universal-view transpiler). Design docs:
+  `docs/design/semantics.md` and `docs/design/transpilation.md`.
+
+- **The MCP agent gateway — the governed front door for AI agents** (Pillar H,
+  H-F1 / H-F2 / H-F4; the *agent firewall*). Meridian now speaks the **Model
+  Context Protocol** (spec `2025-06-18`) at a Streamable-HTTP endpoint `/mcp`
+  (JSON-RPC 2.0: `initialize`, `tools/list`, `tools/call`), behind the same OIDC
+  layer as everything else. **Agents are first-class principals** (`kind =
+  agent`, distinct from users/services) with a governance envelope — an
+  accountable **owner**, a **purpose** statement, an **environment** (dev/prod),
+  a **lifecycle** (expiry + review date), and a **kill switch**. A new
+  `meridian-agents` crate holds the pure protocol/catalog/decision vocabulary
+  (no database), migration 0020 adds `agent_principals` + `agent_budgets` +
+  `agent_activity`, and the server hosts the endpoint, the governance wrapper,
+  and an `/api/v2/agents` control plane. **Context tools (H-F2)** —
+  `search_assets`, `get_table_context`, `get_lineage`, and the
+  metrics/products/glossary reads — are *governed*: an agent sees only what its
+  grants allow, and a policy-masked or denied column is **ABSENT from the
+  returned schema (not nulled)**, so a prompt can never leak the structure of
+  restricted data — enforced by the *same* Pillar-D decision
+  (`governance::resolve_scan_policy`) the scan planner uses, so context and query
+  can never disagree. **Query tools (H-F3)** — `run_sql`, `query_metrics`,
+  `preview_table` — run the full governance chain and are charged against
+  per-agent **budgets** (queries/hour, scanned-bytes/day, dollar-estimate/day,
+  rolling windows, `FOR UPDATE`-serialized) with a **graceful, agent-relayable
+  refusal** when a cap is hit; execution itself is handed to a `QueryExecutor`
+  trait (the seam the `meridian-query` executor implements — stubbed to an honest
+  "not wired" tool-error until wired, with all governance around it live now).
+  **The kill switch** (`POST /api/v2/agents/{id}/suspend`) refuses every tool
+  for a suspended or expired agent. And **the full audit chain is the product**
+  (H-F4): every tool call — allowed, denied, refused, or errored — writes an
+  `agent_activity` ledger row **and** a tamper-evident hash-chained `audit_log`
+  entry on the *same transaction*, cross-referenced, recording *which agent
+  called which tool, the policy decision, the resolved purpose, and what it
+  touched* — the "which agent read which columns for which purpose" answer with
+  a court-grade trail. The MCP protocol/tool distinction is honored throughout
+  (a non-agent caller or unknown tool is a JSON-RPC protocol error; a policy or
+  budget refusal is a `isError: true` tool result the agent relays), and the
+  transport's DNS-rebinding `Origin` defense is enforced. Design doc:
+  `docs/design/agent-gateway.md`.
+
+- **Small-scan query executor — governed `run_sql` / workbench execution**
+  (Pillar H, H-F3; Pillar L, L-F1). A new `meridian-query` crate runs governed
+  `SELECT`s over the Iceberg tables the catalog owns, in-process, for small
+  scans only (spec §8.1) — the shared engine behind the agent gateway's
+  `run_sql` tool and the console workbench; big scans route to registered
+  customer engines. Built on **DataFusion** (the spec's named built-in engine;
+  see ADR 010). The pipeline is the `run_sql` contract, **validate → estimate →
+  refuse-or-execute**: the SQL is parsed and must be a single read-only
+  statement (DML/DDL/`COPY`/multi-statement input refused via the parser, so a
+  governed query can never mutate); the scan's on-disk **bytes and row count are
+  estimated from manifest stats and capped *before any data file is read***, so
+  an oversized query is a cheap, polite refusal that names the escape hatch (a
+  registered engine) for an agent to relay. Tables are read via Meridian's own
+  manifest engine + Parquet reader — mapping columns by Iceberg **field id**
+  (not name or position), synthesizing nulls for schema-evolved files, and
+  materializing v2 position/equality **merge-on-read deletes** (v3 deletion
+  vectors are refused, not silently dropped) — then handed to DataFusion as
+  in-memory Arrow batches, so the manifest layer stays the single source of
+  truth. **Policy is enforced by the same Pillar-D machinery as scan planning:**
+  the caller passes the row filters + column masks resolved by `meridian-authz`,
+  and the executor compiles them into a governed SQL **view** per table — the
+  row filter folded into a `WHERE`, masked columns transformed, dropped columns
+  **absent (not nulled)** so the schema of restricted data cannot leak (H-F2),
+  and any custom mask it cannot verify **failing closed** to a drop.
+  SQL-injection-safe literal/identifier rendering throughout. Every result
+  carries **provenance** (tables + snapshot ids read, policies applied, columns
+  masked) so agents can cite (H-F3) and a CISO audit can answer "which agent
+  read which columns under which policy", plus the scanned-bytes estimate for
+  budget accounting (H-F4). The crate is a pure function of *(metadata + bytes +
+  policy + SQL + caps)* — it resolves no names, loads no metadata, and reads no
+  policy — so it is fully covered by unit + integration tests against real
+  Iceberg fixtures and takes no dependency on the server or the agent gateway;
+  the gateway's `QueryExecutor` trait maps onto it through a thin server-side
+  adapter (documented in the crate root and ADR 010).
+
 - **Zero-scan data-quality monitors, incidents & the trust score — detection
   and operability** (Pillar E, E-F1 / E-F5 / E-F6). The catalog now *watches*
   every table from the commit stream and opens incidents on anomalies —

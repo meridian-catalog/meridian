@@ -49,6 +49,41 @@ pub struct AppConfig {
     /// Data-quality settings (Pillar E: the zero-scan monitor evaluation
     /// worker that opens incidents from the commit stream).
     pub quality: QualityConfig,
+    /// Transpilation-sidecar settings (Pillar G: universal-view transpilation
+    /// and metric compilation via the `SQLGlot` sidecar, §8.5).
+    pub transpilation: TranspilationConfig,
+}
+
+/// Transpilation-sidecar settings (`[transpilation]`): how the Rust server
+/// reaches the `SQLGlot` sidecar (§8.5) for universal-view translation (G-F1)
+/// and metric compilation (G-F2).
+///
+/// The sidecar is a separate, stateless, localhost-scoped process (see
+/// `sidecar/`). The server calls it over HTTP; when it is unreachable, the
+/// universal-view path degrades gracefully (serves the canonical representation
+/// with a status note) rather than failing a `LoadView`. The deterministic
+/// `SQLGlot` path is the sidecar's only transpilation engine; the optional
+/// BYO-key LLM-assist fallback is configured *on the sidecar*, never here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct TranspilationConfig {
+    /// Base URL of the transpilation sidecar. Localhost by default (the sidecar
+    /// binds `127.0.0.1:8200` by design). The server health-checks and calls
+    /// `<base>/v1/transpile`, `<base>/v1/compile_metric`, and `<base>/healthz`.
+    pub sidecar_url: String,
+    /// Per-request timeout (seconds) for sidecar calls. Transpilation is a
+    /// bounded CPU operation; this caps a pathological request so a slow sidecar
+    /// cannot stall a `LoadView` or a metric compile.
+    pub request_timeout_secs: u64,
+}
+
+impl Default for TranspilationConfig {
+    fn default() -> Self {
+        Self {
+            sidecar_url: "http://127.0.0.1:8200".to_owned(),
+            request_timeout_secs: 15,
+        }
+    }
 }
 
 /// Data-quality settings (`[quality]`): the post-commit monitor evaluation

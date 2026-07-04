@@ -8,8 +8,10 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
 axum = { workspace = true }
 chrono = { workspace = true }
+meridian-agents = { workspace = true }
 hex = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
@@ -21,6 +23,11 @@ meridian-executor = { workspace = true }
 meridian-federation = { workspace = true }
 meridian-iceberg = { workspace = true }
 meridian-lineage = { workspace = true }
+# The small-scan query executor (ADR 010): the shared engine behind the agent
+# gateway `run_sql` (H-F3) and the workbench SQL API (L-F1). Its public surface
+# is arrow-free (JSON rows in, JSON rows out), so its internal arrow-58 pin never
+# meets the server's arrow-59 at a type boundary — see ADR 010's arrow-major note.
+meridian-query = { workspace = true }
 meridian-storage = { workspace = true }
 meridian-store = { workspace = true }
 meridian-vending = { workspace = true }

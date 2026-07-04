@@ -116,7 +116,7 @@ answer 406 and are not advertised in `GET /v1/config`).
 |---|---|---|---|
 | `listViews` | `GET .../namespaces/{ns}/views` | Implemented | RBAC: `LIST_TABLES` on the namespace. Pagination: see divergence (a). |
 | `createView` | `POST .../namespaces/{ns}/views` | Implemented | RBAC: `CREATE_VIEW` on the namespace. Multiple SQL representations per version (at most one per dialect, case-insensitive). 409 when the name exists as a view **or a table**: see divergence (g). Default location is uuid-suffixed under the namespace path, like tables. Request field ids are treated as provisional, exactly as on `createTable`: fresh 1-based ids are assigned server-side. Spark 3.5's `CREATE VIEW` numbers the output schema from 0 and used to be rejected with `field id 0 is not positive`; covered by the [Spark smoke](../conformance/engines/spark/README.md). |
-| `loadView` | `GET .../views/{view}` | Implemented | RBAC: `READ` on the view. `config` carries the warehouse's non-secret storage options (see [Storage config passthrough](#storage-config-passthrough)). No `ETag`: the spec defines the `ETag`/`If-None-Match` mechanism for table responses only (`LoadViewResponse` has no `etag` header). The `referenced-by` parameter is accepted and ignored (the caller's own `READ` on the view decides access; chain-based decisions are not implemented). |
+| `loadView` | `GET .../views/{view}` | Implemented | RBAC: `READ` on the view. `config` carries the warehouse's non-secret storage options (see [Storage config passthrough](#storage-config-passthrough)). No `ETag`: the spec defines the `ETag`/`If-None-Match` mechanism for table responses only (`LoadViewResponse` has no `etag` header). The `referenced-by` parameter is accepted and ignored (the caller's own `READ` on the view decides access; chain-based decisions are not implemented). **Universal views (Pillar G, G-F1):** when the requesting engine's dialect is resolvable (explicit `?engine=<dialect>` override, else `User-Agent` inference for well-known engine clients; an unrecognized client gets the view as authored) and the view lacks a representation for that dialect, Meridian transpiles the canonical representation via the SQLGlot sidecar, folds the translated dialect-tagged representation into the served `metadata`'s current version carrying `meridian.transpile-status` (`verified`/`best_effort`/`unsupported`, validated by parse-back), reports it under a non-spec `meridian-transpile` response field, and caches it (side table, no pointer bump). A sidecar outage degrades to the canonical representation with a status note, never a 500. See [`docs/design/semantics.md`](design/semantics.md). |
 | `replaceView` | `POST .../views/{view}` | Implemented | RBAC: `COMMIT` on the view, checked before anything is staged. The view commit path: `assert-view-uuid` checked against current metadata, unknown update/requirement types → 400, updates applied through the validating view-metadata builder (version log grows per current-version change, versions expire per `version.history.num-entries`), bounded compare-and-swap retry (409 `CommitFailedException` after 3 lost races). **Missing:** `Idempotency-Key` is not honored on view endpoints (see [Idempotency keys](#idempotency-keys)); dialect-drop protection (`replace.drop-dialect.allowed`) is not enforced yet (builder TODO). **Known gap:** `add-schema` updates on the replace path validate field ids strictly (must be positive), but view schemas have no cross-version field-id continuity to protect and the Java reference accepts whatever ids the client sends — so Spark 3.5's `CREATE OR REPLACE VIEW` on an *existing* view fails with `field id 0 is not positive` (0-based ids, same shape as the resolved create-path bug). Reproduced by the [Spark smoke](../conformance/engines/spark/README.md#known-gap-create-or-replace-view); initial `CREATE VIEW` is unaffected. |
 | `dropView` | `DELETE .../views/{view}` | Implemented | RBAC: `DROP` on the view. 204; the spec defines no purge for views, so metadata files always remain in object storage. |
 | `viewExists` | `HEAD .../views/{view}` | Implemented | RBAC: `READ` on the view. 204 / 404. |
@@ -877,3 +877,57 @@ write-through index + `metrics_reports` — **no data scan**.
   monitors (with create + enable/disable), and a per-table trust-score lookup.
 - **Not yet**: agent-facing score consumption beyond the search boost;
   per-column data-distribution monitors (those need a scan — E-F2's executor).
+
+### Agent gateway: governed query tools (`/mcp`, Pillar H, H-F3)
+
+The MCP agent gateway's **query tools now execute** on the built-in `DataFusion`
+small-scan executor (ADR 010) — they are no longer stubbed. Full protocol +
+governance details are in [`docs/design/agent-gateway.md`](design/agent-gateway.md);
+the query-execution specifics:
+
+- **`run_sql`** — validated → the referenced tables resolved and each
+  RBAC-READ-checked + ABAC-resolved for the agent → the scan priced from
+  manifest stats and the agent's budget checked **before** any I/O → run on the
+  built-in executor for small scans. Masked columns are **dropped** (absent, not
+  nulled — H-F2). Every result carries **provenance** (tables + snapshot ids +
+  policies applied). An oversized scan is refused before I/O with a
+  route-to-a-registered-engine message; an over-budget query is a graceful
+  `refused_budget`. Small-scan only (128 MiB / 5M-row default caps).
+- **`preview_table`** — a policy-safe sample (masked columns absent, row filters
+  applied), capped to the requested `limit`.
+- **`query_metrics`** — returns an honest "semantic layer not populated"
+  tool-error until metric definitions land (Pillar G); it will then compile a
+  metric to SQL and run it through the same governed path.
+- **Every call is audited** on the tamper-evident agent-activity chain (the
+  firewall product) with the tables/columns touched, the policy decision, and
+  the bytes/cost.
+- **Not yet**: external-engine routing for big scans (a documented refusal today,
+  not a stub); the metric-compilation path (waits on Pillar G semantics).
+
+### Workbench (`/api/v2/workbench`, Pillar L, L-F1/L-F3)
+
+A governed SQL API over the same built-in executor and the same Pillar-D policies
+the agent gateway enforces (one shared path, `crate::mcp::engine`), for humans.
+Full detail in [`docs/design/workbench.md`](design/workbench.md).
+
+- `POST /api/v2/workbench/query` — run a governed SELECT (`{ sql, warehouse?,
+  namespace? }`). Row/column policy applied — but masks are **value-preserving**
+  here (`hash`/partial/NULL — the column stays), unlike the agent path which
+  drops. Returns columns, rows, `truncated`, `provenance`, `bytes_scanned`,
+  `duration_ms`. Per-table RBAC READ enforced; small scans only; big scans
+  refused with guidance. **Authorization**: any authenticated principal (data
+  access is gated per-table by RBAC/ABAC).
+- `GET /api/v2/workbench/history` — the caller's own recent queries (keyset by
+  `?limit` + `?before`). Recording history is a convenience log, not audited.
+- `GET|POST /api/v2/workbench/saved`, `GET|DELETE /api/v2/workbench/saved/{id}` —
+  saved queries (name unique per workspace). Create/delete are audited + outboxed.
+- `POST /api/v2/workbench/snippet` — the notebook handoff (L-F3): PyIceberg/Daft/
+  Pandas connection snippets for a table (RBAC READ required). The client vends
+  scoped creds at connect time via the IRC flow; **no secret is embedded**.
+- **Persistence**: migration `0022_workbench` (`workbench_saved_queries`,
+  `workbench_query_history`).
+- **Console**: a **Workbench** page — a SQL editor over governed assets, a results
+  table with the provenance line, saved queries, history, and the snippet
+  generator; all real `/api/v2` data.
+- **Not yet**: external-engine routing for big scans; visualization / dashboards /
+  scheduled digests (L-F2, explicitly not a BI suite).

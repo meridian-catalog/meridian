@@ -164,6 +164,40 @@ enum Command {
         token: Option<String>,
     },
 
+    /// Manage metrics — first-class semantic objects (Pillar G, G-F2).
+    #[command(subcommand)]
+    Metric(MetricCommand),
+
+    /// Manage the business glossary — terms and asset links (Pillar G, G-F3).
+    #[command(subcommand)]
+    Glossary(GlossaryCommand),
+
+    /// Manage certified data products — named bundles (Pillar G, G-F4).
+    #[command(subcommand)]
+    Product(ProductCommand),
+
+    /// Translate a SQL statement between engine dialects (Pillar G, G-F1).
+    ///
+    /// Deterministic `SQLGlot` via the sidecar; prints the translation with its
+    /// honest status (`verified` | `best_effort` | `unsupported`) and diagnostics.
+    Transpile {
+        /// The SQL statement to translate.
+        #[arg(long)]
+        sql: String,
+        /// Source dialect (e.g. spark, trino, snowflake).
+        #[arg(long = "from")]
+        from_dialect: String,
+        /// Target dialect (e.g. trino, duckdb).
+        #[arg(long = "to")]
+        to_dialect: String,
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
     /// Show the cross-catalog sprawl summary (Pillar B).
     ///
     /// Rolls up across every catalog Meridian knows (its warehouses and
@@ -1036,6 +1070,190 @@ enum QualityCommand {
     },
 }
 
+/// Shared server/token args for the semantics subcommands (kept as a flatten
+/// group so every leaf carries the same two flags without repetition).
+#[derive(Debug, clap::Args)]
+struct ServerArgs {
+    /// Base URL of the Meridian server.
+    #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+    server: String,
+    /// Bearer token (required when the server runs auth.mode = "oidc").
+    #[arg(long, value_name = "TOKEN")]
+    token: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum MetricCommand {
+    /// List metrics.
+    List {
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Show one metric by id.
+    Get {
+        /// The metric id.
+        id: String,
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Create a metric.
+    Create {
+        /// Machine name (unique per workspace).
+        #[arg(long)]
+        name: String,
+        /// Source table/view identifier (dotted).
+        #[arg(long)]
+        source: String,
+        /// Measure aggregation expression, e.g. "SUM(amount)".
+        #[arg(long)]
+        expression: String,
+        /// Canonical dialect the fragments are authored in.
+        #[arg(long, default_value = "trino")]
+        dialect: String,
+        /// A default group-by dimension (repeatable).
+        #[arg(long = "dimension", value_name = "DIM")]
+        dimensions: Vec<String>,
+        /// A default filter fragment (repeatable).
+        #[arg(long = "filter", value_name = "SQL")]
+        filters: Vec<String>,
+        /// Grain description.
+        #[arg(long)]
+        grain: Option<String>,
+        /// Certification: draft | certified | deprecated.
+        #[arg(long, default_value = "draft")]
+        certification: String,
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Delete a metric by id.
+    Delete {
+        /// The metric id.
+        id: String,
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Compile a metric to a chosen engine's SQL.
+    Compile {
+        /// The metric id.
+        id: String,
+        /// Target engine dialect (e.g. trino, duckdb).
+        #[arg(long)]
+        engine: String,
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum GlossaryCommand {
+    /// List glossary terms.
+    List {
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Show one term (with its links) by id.
+    Get {
+        /// The term id.
+        id: String,
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Create a glossary term.
+    Create {
+        /// Term name (unique per workspace).
+        #[arg(long)]
+        name: String,
+        /// The definition (markdown).
+        #[arg(long)]
+        definition: String,
+        /// Certification: draft | certified | deprecated.
+        #[arg(long, default_value = "draft")]
+        certification: String,
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Delete a term by id (and its links).
+    Delete {
+        /// The term id.
+        id: String,
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Link a term to an asset.
+    Link {
+        /// The term id.
+        id: String,
+        /// Asset kind: table | view | metric.
+        #[arg(long)]
+        kind: String,
+        /// Stable asset reference, e.g. "table:<id>".
+        #[arg(long = "ref", value_name = "REF")]
+        asset_ref: String,
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProductCommand {
+    /// List data products.
+    List {
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Show one product (with its members) by id.
+    Get {
+        /// The product id.
+        id: String,
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Create a data product.
+    Create {
+        /// Machine name (unique per workspace).
+        #[arg(long)]
+        name: String,
+        /// Description (markdown).
+        #[arg(long)]
+        description: Option<String>,
+        /// Free-text SLA statement.
+        #[arg(long)]
+        sla: Option<String>,
+        /// Certification: draft | certified | deprecated.
+        #[arg(long, default_value = "draft")]
+        certification: String,
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Delete a product by id (and its membership rows).
+    Delete {
+        /// The product id.
+        id: String,
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Add a member to a product.
+    AddMember {
+        /// The product id.
+        id: String,
+        /// Member kind: table | view | metric | `glossary_term` | contract.
+        #[arg(long)]
+        kind: String,
+        /// Stable member reference.
+        #[arg(long = "ref", value_name = "REF")]
+        member_ref: String,
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Show a product's status page (certification + members + health rollup).
+    Status {
+        /// The product id.
+        id: String,
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -1080,6 +1298,16 @@ fn main() -> ExitCode {
             server,
             token,
         )),
+        Command::Metric(command) => run_async(run_metric(command)),
+        Command::Glossary(command) => run_async(run_glossary(command)),
+        Command::Product(command) => run_async(run_product(command)),
+        Command::Transpile {
+            sql,
+            from_dialect,
+            to_dialect,
+            server,
+            token,
+        } => run_async(run_transpile(sql, from_dialect, to_dialect, server, token)),
         Command::Sprawl {
             stale_threshold_s,
             server,
@@ -2882,6 +3110,378 @@ async fn run_quality(command: QualityCommand) -> Result<(), CliError> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Semantics: metrics (G-F2), glossary (G-F3), products (G-F4), transpile (G-F1)
+// ---------------------------------------------------------------------------
+
+/// `meridian metric ...` — manage semantic metrics.
+async fn run_metric(command: MetricCommand) -> Result<(), CliError> {
+    match command {
+        MetricCommand::List { server } => {
+            let body = client::q_get(
+                &server.server,
+                server.token.as_deref(),
+                "/api/v2/metrics",
+                &[],
+            )
+            .await?;
+            let empty = Vec::new();
+            let metrics = body["metrics"].as_array().unwrap_or(&empty);
+            if metrics.is_empty() {
+                println!("(no metrics)");
+            }
+            for m in metrics {
+                println!(
+                    "{}  {}  source={}  [{}]",
+                    field_str(m, "id"),
+                    field_str(m, "name"),
+                    field_str(m, "source"),
+                    field_str(m, "certification"),
+                );
+            }
+        }
+        MetricCommand::Get { id, server } => {
+            let body = client::q_get(
+                &server.server,
+                server.token.as_deref(),
+                &format!("/api/v2/metrics/{id}"),
+                &[],
+            )
+            .await?;
+            print_metric(&body);
+        }
+        MetricCommand::Create {
+            name,
+            source,
+            expression,
+            dialect,
+            dimensions,
+            filters,
+            grain,
+            certification,
+            server,
+        } => {
+            let payload = serde_json::json!({
+                "name": name,
+                "source": source,
+                "expression": expression,
+                "dialect": dialect,
+                "dimensions": dimensions,
+                "filters": filters,
+                "grain": grain,
+                "certification": certification,
+            });
+            let body = client::q_post(
+                &server.server,
+                server.token.as_deref(),
+                "/api/v2/metrics",
+                Some(&payload),
+            )
+            .await?;
+            println!("created metric {}", field_str(&body, "id"));
+        }
+        MetricCommand::Delete { id, server } => {
+            client::q_delete(
+                &server.server,
+                server.token.as_deref(),
+                &format!("/api/v2/metrics/{id}"),
+            )
+            .await?;
+            println!("deleted metric {id}");
+        }
+        MetricCommand::Compile { id, engine, server } => {
+            let body = client::q_get(
+                &server.server,
+                server.token.as_deref(),
+                &format!("/api/v2/metrics/{id}/compile"),
+                &[("engine", engine)],
+            )
+            .await?;
+            println!("status: {}", field_str(&body, "status"));
+            match body.get("sql").and_then(Value::as_str) {
+                Some(sql) => println!("{sql}"),
+                None => println!("(no SQL — unsupported)"),
+            }
+            print_diagnostics(&body);
+        }
+    }
+    Ok(())
+}
+
+/// `meridian glossary ...` — manage the business glossary.
+async fn run_glossary(command: GlossaryCommand) -> Result<(), CliError> {
+    match command {
+        GlossaryCommand::List { server } => {
+            let body = client::q_get(
+                &server.server,
+                server.token.as_deref(),
+                "/api/v2/glossary/terms",
+                &[],
+            )
+            .await?;
+            let empty = Vec::new();
+            let terms = body["terms"].as_array().unwrap_or(&empty);
+            if terms.is_empty() {
+                println!("(no terms)");
+            }
+            for t in terms {
+                println!(
+                    "{}  {}  [{}]",
+                    field_str(t, "id"),
+                    field_str(t, "name"),
+                    field_str(t, "certification"),
+                );
+            }
+        }
+        GlossaryCommand::Get { id, server } => {
+            let body = client::q_get(
+                &server.server,
+                server.token.as_deref(),
+                &format!("/api/v2/glossary/terms/{id}"),
+                &[],
+            )
+            .await?;
+            println!(
+                "{}  [{}]",
+                field_str(&body, "name"),
+                field_str(&body, "certification")
+            );
+            println!("{}", field_str(&body, "definition"));
+            if let Some(links) = body.get("links").and_then(Value::as_array) {
+                for l in links {
+                    println!(
+                        "  -> {} {}",
+                        field_str(l, "asset_kind"),
+                        field_str(l, "asset_ref")
+                    );
+                }
+            }
+        }
+        GlossaryCommand::Create {
+            name,
+            definition,
+            certification,
+            server,
+        } => {
+            let payload = serde_json::json!({ "name": name, "definition": definition, "certification": certification });
+            let body = client::q_post(
+                &server.server,
+                server.token.as_deref(),
+                "/api/v2/glossary/terms",
+                Some(&payload),
+            )
+            .await?;
+            println!("created term {}", field_str(&body, "id"));
+        }
+        GlossaryCommand::Delete { id, server } => {
+            client::q_delete(
+                &server.server,
+                server.token.as_deref(),
+                &format!("/api/v2/glossary/terms/{id}"),
+            )
+            .await?;
+            println!("deleted term {id}");
+        }
+        GlossaryCommand::Link {
+            id,
+            kind,
+            asset_ref,
+            server,
+        } => {
+            let payload = serde_json::json!({ "asset_kind": kind, "asset_ref": asset_ref });
+            let body = client::q_post(
+                &server.server,
+                server.token.as_deref(),
+                &format!("/api/v2/glossary/terms/{id}/links"),
+                Some(&payload),
+            )
+            .await?;
+            println!("linked ({})", field_str(&body, "id"));
+        }
+    }
+    Ok(())
+}
+
+/// `meridian product ...` — manage certified data products.
+#[allow(clippy::too_many_lines)] // one match arm per product subcommand
+async fn run_product(command: ProductCommand) -> Result<(), CliError> {
+    match command {
+        ProductCommand::List { server } => {
+            let body = client::q_get(
+                &server.server,
+                server.token.as_deref(),
+                "/api/v2/products",
+                &[],
+            )
+            .await?;
+            let empty = Vec::new();
+            let products = body["products"].as_array().unwrap_or(&empty);
+            if products.is_empty() {
+                println!("(no products)");
+            }
+            for p in products {
+                println!(
+                    "{}  {}  [{}]",
+                    field_str(p, "id"),
+                    field_str(p, "name"),
+                    field_str(p, "certification"),
+                );
+            }
+        }
+        ProductCommand::Get { id, server } => {
+            let body = client::q_get(
+                &server.server,
+                server.token.as_deref(),
+                &format!("/api/v2/products/{id}"),
+                &[],
+            )
+            .await?;
+            println!(
+                "{}  [{}]",
+                field_str(&body, "name"),
+                field_str(&body, "certification")
+            );
+            if let Some(members) = body.get("members").and_then(Value::as_array) {
+                for m in members {
+                    println!(
+                        "  - {} {}",
+                        field_str(m, "member_kind"),
+                        field_str(m, "member_ref")
+                    );
+                }
+            }
+        }
+        ProductCommand::Create {
+            name,
+            description,
+            sla,
+            certification,
+            server,
+        } => {
+            let payload = serde_json::json!({
+                "name": name,
+                "description": description,
+                "sla": sla,
+                "certification": certification,
+            });
+            let body = client::q_post(
+                &server.server,
+                server.token.as_deref(),
+                "/api/v2/products",
+                Some(&payload),
+            )
+            .await?;
+            println!("created product {}", field_str(&body, "id"));
+        }
+        ProductCommand::Delete { id, server } => {
+            client::q_delete(
+                &server.server,
+                server.token.as_deref(),
+                &format!("/api/v2/products/{id}"),
+            )
+            .await?;
+            println!("deleted product {id}");
+        }
+        ProductCommand::AddMember {
+            id,
+            kind,
+            member_ref,
+            server,
+        } => {
+            let payload = serde_json::json!({ "member_kind": kind, "member_ref": member_ref });
+            let body = client::q_post(
+                &server.server,
+                server.token.as_deref(),
+                &format!("/api/v2/products/{id}/members"),
+                Some(&payload),
+            )
+            .await?;
+            println!("added member ({})", field_str(&body, "id"));
+        }
+        ProductCommand::Status { id, server } => {
+            let body = client::q_get(
+                &server.server,
+                server.token.as_deref(),
+                &format!("/api/v2/products/{id}/status"),
+                &[],
+            )
+            .await?;
+            println!(
+                "{}  [{}]  health={}  members={}",
+                field_str(&body["product"], "name"),
+                field_str(&body["product"], "certification"),
+                field_str(&body, "health_rollup"),
+                field_i64(&body, "member_total"),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `meridian transpile ...` — translate SQL between engine dialects (G-F1).
+async fn run_transpile(
+    sql: String,
+    from_dialect: String,
+    to_dialect: String,
+    server: String,
+    token: Option<String>,
+) -> Result<(), CliError> {
+    let payload =
+        serde_json::json!({ "sql": sql, "from_dialect": from_dialect, "to_dialect": to_dialect });
+    let body = client::q_post(
+        &server,
+        token.as_deref(),
+        "/api/v2/sql/transpile",
+        Some(&payload),
+    )
+    .await?;
+    println!("status: {}", field_str(&body, "status"));
+    match body.get("sql").and_then(Value::as_str) {
+        Some(translated) => println!("{translated}"),
+        None => println!("(no SQL — unsupported)"),
+    }
+    print_diagnostics(&body);
+    Ok(())
+}
+
+/// Prints a metric record's fields.
+fn print_metric(body: &Value) {
+    println!(
+        "{}  [{}]",
+        field_str(body, "name"),
+        field_str(body, "certification")
+    );
+    println!("  source:     {}", field_str(body, "source"));
+    println!("  expression: {}", field_str(body, "expression"));
+    println!("  dialect:    {}", field_str(body, "dialect"));
+    if let Some(dims) = body.get("dimensions").and_then(Value::as_array)
+        && !dims.is_empty()
+    {
+        let joined: Vec<String> = dims
+            .iter()
+            .filter_map(|d| d.as_str().map(str::to_owned))
+            .collect();
+        println!("  dimensions: {}", joined.join(", "));
+    }
+    if let Some(grain) = body.get("grain").and_then(Value::as_str) {
+        println!("  grain:      {grain}");
+    }
+}
+
+/// Prints the `diagnostics` array of a transpile/compile response, if any.
+fn print_diagnostics(body: &Value) {
+    if let Some(diagnostics) = body.get("diagnostics").and_then(Value::as_array) {
+        for d in diagnostics {
+            println!(
+                "  [{}] {}: {}",
+                field_str(d, "severity"),
+                field_str(d, "code"),
+                field_str(d, "message"),
+            );
+        }
+    }
 }
 
 /// The impact CI gate (F-F5). Prints the downstream blast radius; with

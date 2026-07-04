@@ -5,6 +5,7 @@
 //! now (no `sqlx::query!` macros) so the workspace compiles without a live
 //! database; compile-time checking may be revisited once the schema settles.
 
+pub mod agent;
 pub mod audit;
 pub mod commit;
 pub mod consumer;
@@ -24,12 +25,14 @@ pub mod principal;
 pub mod quality_score;
 pub mod rbac;
 pub mod search;
+pub mod semantics;
 pub mod table;
 pub mod tags;
 pub mod tenancy;
 pub mod view;
 pub mod warehouse;
 pub mod webhook;
+pub mod workbench;
 
 pub use pool::{connect, health_check};
 

@@ -50,6 +50,24 @@ import type {
   LoadTableResult,
   LoadViewResult,
   MaintenanceJob,
+  Metric,
+  ListMetricsResponse,
+  CreateMetricRequest,
+  CompileMetricResponse,
+  GlossaryTerm,
+  ListTermsResponse,
+  CreateTermRequest,
+  DataProduct,
+  ListProductsResponse,
+  CreateProductRequest,
+  ProductStatusResponse,
+  TranspileResponse,
+  WorkbenchQueryResponse,
+  WorkbenchHistoryResponse,
+  ListSavedQueriesResponse,
+  SavedQuery,
+  SaveQueryRequest,
+  SnippetResponse,
   Mirror,
   MirrorSyncStatus,
   NamespaceResponse,
@@ -439,6 +457,80 @@ export const api = {
     request<QualityScoreResponse>(
       `/api/v2/quality/tables/${encodeURIComponent(warehouse)}/${encodeNamespace(ns)}/${encodeURIComponent(table)}/score`,
     ),
+
+  // ---- semantics: metrics (G-F2) ---------------------------------------
+  listMetrics: () => request<ListMetricsResponse>("/api/v2/metrics?limit=500"),
+  createMetric: (body: CreateMetricRequest) =>
+    request<Metric>("/api/v2/metrics", { method: "POST", body }),
+  deleteMetric: (id: string) =>
+    request<void>(`/api/v2/metrics/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      expectNoContent: true,
+    }),
+  compileMetric: (id: string, engine: string) =>
+    request<CompileMetricResponse>(
+      `/api/v2/metrics/${encodeURIComponent(id)}/compile${qs({ engine })}`,
+    ),
+
+  // ---- semantics: glossary (G-F3) --------------------------------------
+  listTerms: () => request<ListTermsResponse>("/api/v2/glossary/terms?limit=500"),
+  createTerm: (body: CreateTermRequest) =>
+    request<GlossaryTerm>("/api/v2/glossary/terms", { method: "POST", body }),
+  deleteTerm: (id: string) =>
+    request<void>(`/api/v2/glossary/terms/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      expectNoContent: true,
+    }),
+
+  // ---- semantics: data products (G-F4) ---------------------------------
+  listProducts: () => request<ListProductsResponse>("/api/v2/products?limit=500"),
+  createProduct: (body: CreateProductRequest) =>
+    request<DataProduct>("/api/v2/products", { method: "POST", body }),
+  deleteProduct: (id: string) =>
+    request<void>(`/api/v2/products/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      expectNoContent: true,
+    }),
+  productStatus: (id: string) =>
+    request<ProductStatusResponse>(
+      `/api/v2/products/${encodeURIComponent(id)}/status`,
+    ),
+
+  // ---- semantics: transpile passthrough (G-F1) -------------------------
+  transpile: (sql: string, from_dialect: string, to_dialect: string) =>
+    request<TranspileResponse>("/api/v2/sql/transpile", {
+      method: "POST",
+      body: { sql, from_dialect, to_dialect },
+    }),
+
+  // ---- workbench (Pillar L, L-F1/L-F3) ---------------------------------
+  runWorkbenchQuery: (body: {
+    sql: string;
+    warehouse?: string;
+    namespace?: string;
+  }) =>
+    request<WorkbenchQueryResponse>("/api/v2/workbench/query", {
+      method: "POST",
+      body,
+    }),
+  workbenchHistory: (limit = 50) =>
+    request<WorkbenchHistoryResponse>(
+      `/api/v2/workbench/history?limit=${limit}`,
+    ),
+  listSavedQueries: () =>
+    request<ListSavedQueriesResponse>("/api/v2/workbench/saved"),
+  saveQuery: (body: SaveQueryRequest) =>
+    request<SavedQuery>("/api/v2/workbench/saved", { method: "POST", body }),
+  deleteSavedQuery: (id: string) =>
+    request<void>(`/api/v2/workbench/saved/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      expectNoContent: true,
+    }),
+  workbenchSnippet: (body: {
+    warehouse: string;
+    namespace: string;
+    table: string;
+  }) => request<SnippetResponse>("/api/v2/workbench/snippet", { method: "POST", body }),
 };
 
 export type Api = typeof api;

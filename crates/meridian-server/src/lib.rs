@@ -26,9 +26,11 @@ pub mod error;
 pub mod events;
 pub mod governance;
 pub mod maintenance;
+pub mod mcp;
 pub mod planning;
 pub mod quality_monitor;
 pub mod routes;
+pub mod sidecar;
 
 /// Shared state available to all handlers.
 #[derive(Debug, Clone)]
@@ -67,6 +69,32 @@ pub fn build_router(state: AppState) -> Router {
     // Scan-planning runtime (manifest LRU, bounded async plan pool),
     // shared by the planning handlers via a request extension.
     let planning_runtime = planning::PlanningRuntime::from_config(&state.config.planning);
+    // The agent-gateway query executor (H-F3), held behind the QueryExecutor
+    // trait as a request extension. It is the wired DataFusion small-scan
+    // executor (ADR 010): its label ("datafusion") is recorded in the audit
+    // trail, and its presence is what makes the query path "wired". Governed,
+    // multi-table execution is resolved per-principal in `mcp::engine` (which
+    // the query handlers call directly, since only there is the principal
+    // available to govern the query); this trait object covers the seam and the
+    // table-free case (`SELECT 1`).
+    let query_executor: std::sync::Arc<dyn meridian_agents::executor::QueryExecutor> =
+        std::sync::Arc::new(mcp::executor::DataFusionExecutor);
+
+    // The transpilation-sidecar client (Pillar G, §8.5): universal-view
+    // translation (G-F1) and metric compilation (G-F2) call the SQLGlot sidecar
+    // through this, held as a request extension. If the HTTP client cannot be
+    // built (a broken TLS/config state) the server logs and continues with the
+    // client absent — the view/semantics paths then degrade gracefully (serve
+    // the canonical form / report unsupported) exactly as they do when the
+    // sidecar is merely unreachable. A missing client is never a 500.
+    let sidecar_client = match sidecar::SidecarClient::from_config(&state.config.transpilation) {
+        Ok(client) => Some(client),
+        Err(error) => {
+            tracing::error!(%error, "failed to build transpilation sidecar client; \
+                universal-view transpilation and metric compilation will be unavailable");
+            None
+        }
+    };
 
     // The Iceberg REST surface, mounted both at the spec path prefix
     // (/iceberg/v1) and at the bare /v1 alias many clients default to.
@@ -197,6 +225,66 @@ pub fn build_router(state: AppState) -> Router {
         // Asset search (Pillar A search v1): results are filtered to the
         // caller's visibility inside the query — see routes::search.
         .route("/api/v2/search", get(routes::search::search))
+        // Semantics & universal views (Pillar G). The standalone transpile
+        // passthrough (G-F1) is a migration tool + demo magnet; the metrics
+        // (G-F2), glossary (G-F3), and data-product (G-F4) CRUD are the semantic
+        // object model. All management-gated (see routes::views / routes::semantics).
+        .route("/api/v2/sql/transpile", post(routes::views::transpile_sql))
+        .route(
+            "/api/v2/metrics",
+            get(routes::semantics::list_metrics).post(routes::semantics::create_metric),
+        )
+        .route(
+            "/api/v2/metrics/{id}",
+            get(routes::semantics::get_metric)
+                .patch(routes::semantics::update_metric)
+                .delete(routes::semantics::delete_metric),
+        )
+        .route(
+            "/api/v2/metrics/{id}/compile",
+            get(routes::semantics::compile_metric),
+        )
+        .route(
+            "/api/v2/glossary/terms",
+            get(routes::semantics::list_terms).post(routes::semantics::create_term),
+        )
+        .route(
+            "/api/v2/glossary/terms/{id}",
+            get(routes::semantics::get_term)
+                .patch(routes::semantics::update_term)
+                .delete(routes::semantics::delete_term),
+        )
+        .route(
+            "/api/v2/glossary/terms/{id}/links",
+            get(routes::semantics::list_term_links).post(routes::semantics::link_term),
+        )
+        .route(
+            "/api/v2/glossary/links/{id}",
+            delete(routes::semantics::unlink_term),
+        )
+        .route(
+            "/api/v2/products",
+            get(routes::semantics::list_products).post(routes::semantics::create_product),
+        )
+        .route(
+            "/api/v2/products/{id}",
+            get(routes::semantics::get_product)
+                .patch(routes::semantics::update_product)
+                .delete(routes::semantics::delete_product),
+        )
+        .route(
+            "/api/v2/products/{id}/members",
+            get(routes::semantics::list_product_members)
+                .post(routes::semantics::add_product_member),
+        )
+        .route(
+            "/api/v2/products/members/{id}",
+            delete(routes::semantics::remove_product_member),
+        )
+        .route(
+            "/api/v2/products/{id}/status",
+            get(routes::semantics::product_status),
+        )
         // Events surface (webhooks, feed, durable consumers) — see
         // routes::events for the authorization policy.
         .route(
@@ -469,6 +557,64 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v2/quality/tables/{warehouse}/{namespace}/{table}/score",
             get(routes::quality::table_quality_score),
         )
+        // The MCP agent gateway (Pillar H, H-F1): a Streamable-HTTP MCP server.
+        // One endpoint, POST for JSON-RPC (initialize/tools/list/tools/call),
+        // GET/DELETE answered 405 (no server-initiated stream, stateless
+        // sessions). Auth is the shared OIDC middleware; the gateway requires a
+        // registered agent principal. Governance/budget/audit live in
+        // `crate::mcp`.
+        .route(
+            "/mcp",
+            post(routes::mcp::mcp_post)
+                .get(routes::mcp::mcp_get)
+                .delete(routes::mcp::mcp_delete),
+        )
+        // Agent management (Pillar H, H-F1/H-F4): register agents + budgets,
+        // list them, the kill switch (suspend/enable), and the activity ledger
+        // (the CISO evidence view). Management-gated (see routes::agents).
+        .route(
+            "/api/v2/agents",
+            get(routes::agents::list_agents).post(routes::agents::register_agent),
+        )
+        .route("/api/v2/agents/{id}", get(routes::agents::get_agent))
+        .route(
+            "/api/v2/agents/{id}/suspend",
+            post(routes::agents::suspend_agent),
+        )
+        .route(
+            "/api/v2/agents/{id}/enable",
+            post(routes::agents::enable_agent),
+        )
+        .route(
+            "/api/v2/agents/activity",
+            get(routes::agents::list_activity),
+        )
+        // The SQL workbench (Pillar L, L-F1/L-F3): a governed SQL API over the
+        // built-in small-scan executor (same Pillar-D policies as the agent
+        // gateway and scan planner), plus query history, saved queries, and the
+        // notebook-handoff snippet generator. Query execution enforces per-table
+        // RBAC READ + ABAC inside `mcp::engine`; management routes are
+        // workspace-scoped and attributed to the caller. See routes::workbench.
+        .route(
+            "/api/v2/workbench/query",
+            post(routes::workbench::run_query),
+        )
+        .route(
+            "/api/v2/workbench/history",
+            get(routes::workbench::list_history),
+        )
+        .route(
+            "/api/v2/workbench/saved",
+            get(routes::workbench::list_saved_queries).post(routes::workbench::create_saved_query),
+        )
+        .route(
+            "/api/v2/workbench/saved/{id}",
+            get(routes::workbench::get_saved_query).delete(routes::workbench::delete_saved_query),
+        )
+        .route(
+            "/api/v2/workbench/snippet",
+            post(routes::workbench::generate_snippet),
+        )
         // Unmatched routes and wrong methods must still speak the IRC error
         // envelope — engines parse error bodies, not just status codes.
         .fallback(route_not_found)
@@ -483,7 +629,12 @@ pub fn build_router(state: AppState) -> Router {
             auth_state,
             auth::authenticate,
         ))
-        .layer(axum::Extension(planning_runtime));
+        .layer(axum::Extension(planning_runtime))
+        .layer(axum::Extension(query_executor))
+        // The sidecar client is an `Option`: handlers that need it check for
+        // its presence and degrade gracefully when it is absent (build failed)
+        // or unreachable (per-call transport error).
+        .layer(axum::Extension(sidecar_client));
 
     routes
         .layer(

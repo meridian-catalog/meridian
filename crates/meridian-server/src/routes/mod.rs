@@ -7,6 +7,7 @@
 //! inserts the anonymous principal, whose audit string is `"anonymous"` —
 //! identical to the pre-authentication behavior.
 
+pub mod agents;
 pub mod audit;
 pub mod events;
 pub mod federation;
@@ -16,13 +17,16 @@ pub mod health;
 pub mod iceberg;
 pub mod lineage;
 pub mod maintenance;
+pub mod mcp;
 pub mod namespaces;
 pub mod planning;
 pub mod principals;
 pub mod quality;
 pub mod search;
+pub mod semantics;
 pub mod signing;
 pub mod tables;
 pub mod vending;
 pub mod views;
 pub mod warehouses;
+pub mod workbench;
