@@ -664,6 +664,9 @@ async fn commit_plan(
             new_metadata_location: staged_location.clone(),
         },
         derived: Some(derived_state(&candidate)),
+        // Maintenance commits (compaction, expiry) are catalog-internal and
+        // carry no contract violation.
+        contract_violation: None,
     };
 
     match backend.commit_tables(std::slice::from_ref(&op), None).await {

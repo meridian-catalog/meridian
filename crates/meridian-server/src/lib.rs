@@ -27,6 +27,7 @@ pub mod events;
 pub mod governance;
 pub mod maintenance;
 pub mod planning;
+pub mod quality_monitor;
 pub mod routes;
 
 /// Shared state available to all handlers.
@@ -373,6 +374,101 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v2/governance/evidence",
             get(routes::governance::evidence),
         )
+        // Lineage & impact (Pillar F): the up/downstream graph (F-F5), the
+        // impact/blast-radius query (F-F5), and the OpenLineage sink (F-F2).
+        // All management-gated (see routes::lineage). Commit-native edges
+        // (F-F1) are produced by the post-commit lineage worker spawned in
+        // `serve`, off the sacred commit path.
+        .route("/api/v2/lineage", get(routes::lineage::get_lineage))
+        .route("/api/v2/lineage/impact", get(routes::lineage::get_impact))
+        .route(
+            "/api/v2/lineage/openlineage",
+            post(routes::lineage::ingest_openlineage),
+        )
+        // Data contracts & the circuit breaker (Pillar E, E-F3/E-F4): versioned
+        // contract objects, per-table status, the violation ledger, and
+        // quarantine publish/discard. All management-gated (see routes::quality).
+        // The circuit breaker itself runs as the pre-commit hook in the commit
+        // driver (routes::tables); these endpoints are its control plane.
+        .route(
+            "/api/v2/quality/contracts",
+            get(routes::quality::list_contracts).post(routes::quality::create_contract),
+        )
+        .route(
+            "/api/v2/quality/contracts/{id}",
+            get(routes::quality::get_contract)
+                .patch(routes::quality::update_contract)
+                .delete(routes::quality::delete_contract),
+        )
+        .route(
+            "/api/v2/quality/contracts/{id}/versions",
+            get(routes::quality::list_contract_versions),
+        )
+        .route(
+            "/api/v2/quality/tables/{warehouse}/{namespace}/{table}/contracts",
+            get(routes::quality::table_contracts),
+        )
+        .route(
+            "/api/v2/quality/violations",
+            get(routes::quality::list_violations),
+        )
+        .route(
+            "/api/v2/quality/tables/{warehouse}/{namespace}/{table}/quarantine/{snapshot}/publish",
+            post(routes::quality::publish_quarantine),
+        )
+        .route(
+            "/api/v2/quality/tables/{warehouse}/{namespace}/{table}/quarantine/{snapshot}/discard",
+            post(routes::quality::discard_quarantine),
+        )
+        // Zero-scan data-quality monitors (E-F1), incidents (E-F5), per-table
+        // status + quality score (E-F5/E-F6). Monitors are evaluated off the
+        // sacred commit path by the quality-monitor worker spawned in `serve`;
+        // these endpoints are the control + read plane. All management-gated.
+        .route(
+            "/api/v2/quality/monitors",
+            get(routes::quality::list_monitors).post(routes::quality::create_monitor),
+        )
+        // `results` is a static segment, so it must be registered before the
+        // `{id}` capture (axum matches statics first, but keeping them adjacent
+        // documents the intent).
+        .route(
+            "/api/v2/quality/monitors/results",
+            get(routes::quality::list_monitor_results),
+        )
+        .route(
+            "/api/v2/quality/monitors/{id}",
+            get(routes::quality::get_monitor)
+                .patch(routes::quality::update_monitor)
+                .delete(routes::quality::delete_monitor),
+        )
+        .route(
+            "/api/v2/quality/incidents",
+            get(routes::quality::list_incidents),
+        )
+        .route(
+            "/api/v2/quality/incidents/{id}",
+            get(routes::quality::get_incident),
+        )
+        .route(
+            "/api/v2/quality/incidents/{id}/ack",
+            post(routes::quality::acknowledge_incident),
+        )
+        .route(
+            "/api/v2/quality/incidents/{id}/resolve",
+            post(routes::quality::resolve_incident),
+        )
+        .route(
+            "/api/v2/quality/tables/{warehouse}/{namespace}/{table}/status",
+            get(routes::quality::table_status),
+        )
+        .route(
+            "/api/v2/quality/tables/{warehouse}/{namespace}/{table}/status/history",
+            get(routes::quality::table_status_history),
+        )
+        .route(
+            "/api/v2/quality/tables/{warehouse}/{namespace}/{table}/score",
+            get(routes::quality::table_quality_score),
+        )
         // Unmatched routes and wrong methods must still speak the IRC error
         // envelope — engines parse error bodies, not just status codes.
         .fallback(route_not_found)
@@ -529,6 +625,40 @@ pub async fn serve(config: AppConfig, pool: PgPool) -> Result<()> {
         None
     };
 
+    // Lineage (Pillar F, F-F1): the post-commit lineage worker consumes the
+    // durable `table.committed` event stream *after* the commit — never on the
+    // sacred commit path — and records commit-native edges from each new
+    // snapshot's summary. Crash-safe by construction (a durable consumer
+    // cursor + idempotent edge upserts), so aborting at shutdown is fine.
+    let lineage_worker = if config.lineage.enabled {
+        Some(tokio::spawn(meridian_lineage::run_worker(
+            pool.clone(),
+            meridian_store::tenancy::default_workspace_id(),
+            Duration::from_secs(config.lineage.poll_interval_secs),
+        )))
+    } else {
+        tracing::info!("lineage post-commit worker disabled by configuration");
+        None
+    };
+
+    // Data quality (Pillar E, E-F1/E-F5): the post-commit monitor evaluation
+    // worker consumes the same durable `table.committed` stream *after* the
+    // commit — never on the sacred commit path — computes zero-scan monitor
+    // results per table (from the snapshot index, no data scan), and opens
+    // incidents on breaches with a lineage-derived blast radius. Crash-safe by
+    // construction (a durable consumer cursor + incident de-duplication), so
+    // aborting at shutdown is fine.
+    let quality_worker = if config.quality.enabled {
+        Some(tokio::spawn(quality_monitor::run_worker(
+            pool.clone(),
+            meridian_store::tenancy::default_workspace_id(),
+            config.quality.clone(),
+        )))
+    } else {
+        tracing::info!("quality monitor evaluation worker disabled by configuration");
+        None
+    };
+
     let state = AppState {
         pool,
         config: Arc::new(config),
@@ -551,6 +681,12 @@ pub async fn serve(config: AppConfig, pool: PgPool) -> Result<()> {
     }
     if let Some(federation_worker) = federation_worker {
         federation_worker.abort();
+    }
+    if let Some(lineage_worker) = lineage_worker {
+        lineage_worker.abort();
+    }
+    if let Some(quality_worker) = quality_worker {
+        quality_worker.abort();
     }
     served?;
 

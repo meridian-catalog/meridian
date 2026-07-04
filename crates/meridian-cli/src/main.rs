@@ -120,6 +120,50 @@ enum Command {
     #[command(subcommand)]
     Govern(GovernCommand),
 
+    /// Manage zero-scan data-quality monitors (Pillar E).
+    #[command(subcommand)]
+    Monitor(MonitorCommand),
+
+    /// Manage data-quality incidents (Pillar E).
+    #[command(subcommand)]
+    Incident(IncidentCommand),
+
+    /// Inspect data-quality: per-table status and trust score (Pillar E).
+    #[command(subcommand)]
+    Quality(QualityCommand),
+
+    /// Analyze the downstream blast radius of a change; a CI gate (Pillar F).
+    ///
+    /// Prints every downstream asset a change would affect and the owners to
+    /// notify. With `--fail-on-downstream`, exits non-zero when the change
+    /// breaks any downstream asset — drop it into a dbt/SQL CI job to block a
+    /// breaking change before it merges.
+    Impact {
+        /// The change: `drop_table` or `drop_column:<name>`.
+        #[arg(long, value_name = "CHANGE")]
+        change: String,
+
+        /// The asset the change is to (`warehouse.namespace.table`).
+        #[arg(long, value_name = "ASSET")]
+        asset: String,
+
+        /// Traversal depth (1-20); default server-side (3).
+        #[arg(long)]
+        depth: Option<u32>,
+
+        /// Exit non-zero when the change breaks any downstream asset.
+        #[arg(long)]
+        fail_on_downstream: bool,
+
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
     /// Show the cross-catalog sprawl summary (Pillar B).
     ///
     /// Rolls up across every catalog Meridian knows (its warehouses and
@@ -809,6 +853,189 @@ enum NamespaceCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum MonitorCommand {
+    /// List all monitors.
+    List {
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// Create a monitor on a table or namespace.
+    Create {
+        /// Human name, unique per workspace.
+        #[arg(long)]
+        name: String,
+        /// The zero-scan signal to compute (freshness, volume, schema change,
+        /// file size, snapshot debt, or commit failure). See the docs for the
+        /// exact kind tokens.
+        #[arg(long)]
+        kind: String,
+        /// Warehouse the bound securable lives in.
+        #[arg(long)]
+        warehouse: String,
+        /// Bind to `table` or `namespace`.
+        #[arg(long, default_value = "table")]
+        bound_to: String,
+        /// The dotted namespace (the namespace itself, or the table's).
+        #[arg(long)]
+        namespace: String,
+        /// The table name (required for a table binding).
+        #[arg(long)]
+        table: Option<String>,
+        /// Incident severity: low, medium, high.
+        #[arg(long)]
+        severity: Option<String>,
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// Enable or disable a monitor.
+    Set {
+        /// The monitor id.
+        #[arg(value_name = "ID")]
+        id: String,
+        /// Enable the monitor.
+        #[arg(long, conflicts_with = "disable")]
+        enable: bool,
+        /// Disable the monitor.
+        #[arg(long)]
+        disable: bool,
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// Delete a monitor.
+    Rm {
+        /// The monitor id.
+        #[arg(value_name = "ID")]
+        id: String,
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// Show recent monitor evaluation results.
+    Results {
+        /// Restrict to one monitor id.
+        #[arg(long)]
+        monitor: Option<String>,
+        /// Max rows.
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum IncidentCommand {
+    /// List incidents (newest first).
+    List {
+        /// Only live (open + acknowledged) incidents.
+        #[arg(long)]
+        live: bool,
+        /// Restrict to one status: open, acknowledged, resolved.
+        #[arg(long)]
+        status: Option<String>,
+        /// Max rows.
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// Acknowledge an open incident.
+    Ack {
+        /// The incident id.
+        #[arg(value_name = "ID")]
+        id: String,
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// Resolve an incident.
+    Resolve {
+        /// The incident id.
+        #[arg(value_name = "ID")]
+        id: String,
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum QualityCommand {
+    /// Show a table's traffic-light status (worst live incident severity).
+    Status {
+        /// Warehouse the table lives in.
+        #[arg(long)]
+        warehouse: String,
+        /// The dotted namespace.
+        #[arg(long)]
+        namespace: String,
+        /// The table name.
+        #[arg(long)]
+        table: String,
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// Show a table's composite quality / trust score with its components.
+    Score {
+        /// Warehouse the table lives in.
+        #[arg(long)]
+        warehouse: String,
+        /// The dotted namespace.
+        #[arg(long)]
+        namespace: String,
+        /// The table name.
+        #[arg(long)]
+        table: String,
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -835,6 +1062,24 @@ fn main() -> ExitCode {
         Command::Tag(command) => run_async(run_tag(command)),
         Command::Policy(command) => run_async(run_policy(command)),
         Command::Govern(command) => run_async(run_govern(command)),
+        Command::Monitor(command) => run_async(run_monitor(command)),
+        Command::Incident(command) => run_async(run_incident(command)),
+        Command::Quality(command) => run_async(run_quality(command)),
+        Command::Impact {
+            change,
+            asset,
+            depth,
+            fail_on_downstream,
+            server,
+            token,
+        } => run_async(run_impact(
+            change,
+            asset,
+            depth,
+            fail_on_downstream,
+            server,
+            token,
+        )),
         Command::Sprawl {
             stale_threshold_s,
             server,
@@ -2352,4 +2597,364 @@ fn run_serve(all_in_one: bool, config_path: Option<&std::path::Path>) -> Result<
 
         meridian_server::serve(config, pool).await
     })
+}
+
+// ---------------------------------------------------------------------------
+// Data quality (Pillar E): monitors, incidents, quality score
+// ---------------------------------------------------------------------------
+
+async fn run_monitor(command: MonitorCommand) -> Result<(), CliError> {
+    match command {
+        MonitorCommand::List { server, token } => monitor_list(&server, token.as_deref()).await,
+        MonitorCommand::Create {
+            name,
+            kind,
+            warehouse,
+            bound_to,
+            namespace,
+            table,
+            severity,
+            server,
+            token,
+        } => {
+            let mut body = serde_json::json!({
+                "name": name,
+                "kind": kind,
+                "warehouse": warehouse,
+                "bound_to": bound_to,
+                "namespace": namespace,
+            });
+            if let Some(table) = table {
+                body["table"] = Value::String(table);
+            }
+            if let Some(severity) = severity {
+                body["severity"] = Value::String(severity);
+            }
+            let created = client::q_post(
+                &server,
+                token.as_deref(),
+                "/api/v2/quality/monitors",
+                Some(&body),
+            )
+            .await?;
+            println!("created monitor {}", field_str(&created, "id"));
+            Ok(())
+        }
+        MonitorCommand::Set {
+            id,
+            enable,
+            disable,
+            server,
+            token,
+        } => {
+            if !enable && !disable {
+                return Err(CliError("pass --enable or --disable".to_owned()));
+            }
+            let body = serde_json::json!({ "enabled": enable && !disable });
+            let path = format!("/api/v2/quality/monitors/{id}");
+            let updated = client::q_patch(&server, token.as_deref(), &path, &body).await?;
+            println!(
+                "monitor {} enabled={}",
+                field_str(&updated, "id"),
+                updated
+                    .get("enabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            );
+            Ok(())
+        }
+        MonitorCommand::Rm { id, server, token } => {
+            let path = format!("/api/v2/quality/monitors/{id}");
+            client::q_delete(&server, token.as_deref(), &path).await?;
+            println!("deleted monitor {id}");
+            Ok(())
+        }
+        MonitorCommand::Results {
+            monitor,
+            limit,
+            server,
+            token,
+        } => monitor_results(&server, token.as_deref(), monitor.as_deref(), limit).await,
+    }
+}
+
+/// `meridian monitor list` — renders the monitor table.
+async fn monitor_list(server: &str, token: Option<&str>) -> Result<(), CliError> {
+    let body = client::q_get(server, token, "/api/v2/quality/monitors", &[]).await?;
+    let empty = Vec::new();
+    let monitors = body
+        .get("monitors")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+    if monitors.is_empty() {
+        println!("no monitors");
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = monitors
+        .iter()
+        .map(|m| {
+            vec![
+                field_str(m, "id"),
+                field_str(m, "name"),
+                field_str(m, "kind"),
+                field_str(m, "bound_to"),
+                field_str(m, "severity"),
+                m.get("enabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    .to_string(),
+            ]
+        })
+        .collect();
+    print!(
+        "{}",
+        client::render_table(
+            &["ID", "NAME", "KIND", "BOUND", "SEVERITY", "ENABLED"],
+            &rows
+        )
+    );
+    Ok(())
+}
+
+/// `meridian monitor results` — renders the recent evaluation series.
+async fn monitor_results(
+    server: &str,
+    token: Option<&str>,
+    monitor: Option<&str>,
+    limit: i64,
+) -> Result<(), CliError> {
+    let mut query: Vec<(&str, String)> = vec![("limit", limit.to_string())];
+    if let Some(monitor) = monitor {
+        query.push(("monitor_id", monitor.to_owned()));
+    }
+    let body = client::q_get(server, token, "/api/v2/quality/monitors/results", &query).await?;
+    let empty = Vec::new();
+    let results = body
+        .get("results")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+    if results.is_empty() {
+        println!("no results");
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = results
+        .iter()
+        .map(|r| {
+            vec![
+                field_str(r, "kind"),
+                field_str(r, "status"),
+                field_str(r, "result_kind"),
+                field_str(r, "detail"),
+            ]
+        })
+        .collect();
+    print!(
+        "{}",
+        client::render_table(&["KIND", "STATUS", "RESULT", "DETAIL"], &rows)
+    );
+    Ok(())
+}
+
+async fn run_incident(command: IncidentCommand) -> Result<(), CliError> {
+    match command {
+        IncidentCommand::List {
+            live,
+            status,
+            limit,
+            server,
+            token,
+        } => {
+            let mut query: Vec<(&str, String)> = vec![("limit", limit.to_string())];
+            if live {
+                query.push(("live", "true".to_owned()));
+            }
+            if let Some(status) = &status {
+                query.push(("status", status.clone()));
+            }
+            let body = client::q_get(
+                &server,
+                token.as_deref(),
+                "/api/v2/quality/incidents",
+                &query,
+            )
+            .await?;
+            let empty = Vec::new();
+            let incidents = body
+                .get("incidents")
+                .and_then(Value::as_array)
+                .unwrap_or(&empty);
+            if incidents.is_empty() {
+                println!("no incidents");
+                return Ok(());
+            }
+            let rows: Vec<Vec<String>> = incidents
+                .iter()
+                .map(|i| {
+                    let blast = i
+                        .get("blast_radius")
+                        .and_then(Value::as_array)
+                        .map_or(0, Vec::len);
+                    vec![
+                        field_str(i, "id"),
+                        field_str(i, "status"),
+                        field_str(i, "severity"),
+                        field_str(i, "table_ident"),
+                        field_str(i, "kind"),
+                        blast.to_string(),
+                    ]
+                })
+                .collect();
+            print!(
+                "{}",
+                client::render_table(
+                    &["ID", "STATUS", "SEVERITY", "TABLE", "KIND", "DOWNSTREAM"],
+                    &rows
+                )
+            );
+        }
+        IncidentCommand::Ack { id, server, token } => {
+            let path = format!("/api/v2/quality/incidents/{id}/ack");
+            let body = client::q_post(&server, token.as_deref(), &path, None).await?;
+            println!("acknowledged incident {}", field_str(&body, "id"));
+        }
+        IncidentCommand::Resolve { id, server, token } => {
+            let path = format!("/api/v2/quality/incidents/{id}/resolve");
+            let body = client::q_post(&server, token.as_deref(), &path, None).await?;
+            println!("resolved incident {}", field_str(&body, "id"));
+        }
+    }
+    Ok(())
+}
+
+async fn run_quality(command: QualityCommand) -> Result<(), CliError> {
+    match command {
+        QualityCommand::Status {
+            warehouse,
+            namespace,
+            table,
+            server,
+            token,
+        } => {
+            let path = format!(
+                "/api/v2/quality/tables/{warehouse}/{}/{table}/status",
+                encode_ns_dotted(&namespace)
+            );
+            let body = client::q_get(&server, token.as_deref(), &path, &[]).await?;
+            println!(
+                "{}  status={}  live={} (high {} / medium {} / low {})",
+                field_str(&body, "ident"),
+                field_str(&body, "status"),
+                field_i64(&body, "live_incidents"),
+                field_i64(&body, "high"),
+                field_i64(&body, "medium"),
+                field_i64(&body, "low"),
+            );
+        }
+        QualityCommand::Score {
+            warehouse,
+            namespace,
+            table,
+            server,
+            token,
+        } => {
+            let path = format!(
+                "/api/v2/quality/tables/{warehouse}/{}/{table}/score",
+                encode_ns_dotted(&namespace)
+            );
+            let body = client::q_get(&server, token.as_deref(), &path, &[]).await?;
+            println!(
+                "{}  score={} (grade {})",
+                field_str(&body, "ident"),
+                field_i64(&body, "score"),
+                field_str(&body, "grade"),
+            );
+            if let Some(c) = body.get("components").and_then(Value::as_object) {
+                let f = |k: &str| c.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+                println!(
+                    "  monitors {:.2}  contract {:.2}  ownership {:.2}  docs {:.2}  freshness {:.2}",
+                    f("monitors"),
+                    f("contract"),
+                    f("ownership"),
+                    f("docs"),
+                    f("freshness"),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The impact CI gate (F-F5). Prints the downstream blast radius; with
+/// `--fail-on-downstream`, returns an error (non-zero exit) when any downstream
+/// asset is affected — the CI-blocking behavior for dbt/SQL repos.
+async fn run_impact(
+    change: String,
+    asset: String,
+    depth: Option<u32>,
+    fail_on_downstream: bool,
+    server: String,
+    token: Option<String>,
+) -> Result<(), CliError> {
+    let report = client::impact(&server, token.as_deref(), &asset, &change, depth).await?;
+    let empty = Vec::new();
+    let affected = report
+        .get("affected")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+
+    println!(
+        "impact of {} on {}: {} downstream asset(s) affected",
+        field_str(&report, "change"),
+        field_str(&report, "asset"),
+        affected.len(),
+    );
+
+    if !affected.is_empty() {
+        let rows: Vec<Vec<String>> = affected
+            .iter()
+            .map(|a| {
+                vec![
+                    a.get("ident")
+                        .and_then(Value::as_str)
+                        .map_or_else(|| field_str(a, "table_id"), str::to_owned),
+                    field_i64(a, "depth").to_string(),
+                    a.get("via_column")
+                        .and_then(Value::as_str)
+                        .unwrap_or("-")
+                        .to_owned(),
+                    a.get("owner")
+                        .and_then(Value::as_str)
+                        .unwrap_or("-")
+                        .to_owned(),
+                ]
+            })
+            .collect();
+        print!(
+            "{}",
+            client::render_table(&["ASSET", "DEPTH", "VIA COLUMN", "OWNER"], &rows)
+        );
+    }
+
+    let owners = report
+        .get("owners")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+    if !owners.is_empty() {
+        let names: Vec<&str> = owners.iter().filter_map(Value::as_str).collect();
+        println!("owners to notify: {}", names.join(", "));
+    }
+
+    if fail_on_downstream && !affected.is_empty() {
+        return Err(CliError(format!(
+            "{} downstream asset(s) would break — failing (--fail-on-downstream)",
+            affected.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Encodes a dotted namespace for a URL path segment (levels joined by the
+/// URL-encoded unit separator), matching the server's `decode_namespace_param`.
+fn encode_ns_dotted(namespace: &str) -> String {
+    namespace.split('.').collect::<Vec<_>>().join("%1F")
 }

@@ -5,5 +5,15 @@
 # IdP (identity provider) is standard authentication vocabulary used across
 # the auth module and the principal contract. OAuth2 is the exact protocol
 # name (clippy already whitelists the bare "OAuth"); it recurs in the
-# federation mirror auth docs.
-doc-valid-idents = ["IdP", "IdPs", "OAuth2", ".."]
+# federation mirror auth docs. OpenLineage / Marquez / Airflow / Dagster are
+# proper product/protocol names in the lineage module docs (Pillar F).
+doc-valid-idents = [
+    "IdP",
+    "IdPs",
+    "OAuth2",
+    "OpenLineage",
+    "Marquez",
+    "Airflow",
+    "Dagster",
+    "..",
+]

@@ -695,3 +695,185 @@ the same bar as warehouse CRUD.
 - **Console**: the **Policies** page — classification tags (list + create),
   policies (list + a kind-aware create form + bind-to-tag), an effective-policy
   lookup, and a drift scan.
+
+### Lineage & impact (`/api/v2/lineage`, `/api/v2/lineage/openlineage`)
+
+Table-level lineage (Pillar F, F-F1/F-F2/F-F5) with a hard **no-fabrication**
+guarantee: every edge traces to a concrete declaration — a commit that listed
+its inputs, or an engine that declared an (input, output) pair — and an
+identifier we cannot resolve becomes a labeled *external* node, never an
+invented table. Meridian does **not** emit the "everything-relates-to-
+everything" cartesian edges that are OpenLineage's documented failure mode; a
+table with no evidence has an empty lineage graph, truthfully empty. Full model
+and the OpenLineage shapes: [docs/design/lineage.md](design/lineage.md).
+
+- **Commit-native lineage (F-F1)**: a **post-commit** worker (spawned by
+  `meridian serve`, off the sacred commit path — it consumes the durable
+  `table.committed` event stream) records an edge whenever a new snapshot's
+  summary *declares* its inputs (`meridian.lineage.inputs` / `input-tables` /
+  `source-tables` / `dbt.upstream`), confidence-labeled and stamped with the
+  engine fingerprint (`spark.app.id`, Flink job, Trino query id, dbt invocation
+  id). No declared inputs → no edges. Zero pipeline setup.
+- **OpenLineage sink (F-F2)**: `POST /api/v2/lineage/openlineage` accepts an
+  OpenLineage 1.x `RunEvent` (Spark/Airflow/dbt/Flink); unknown fields are
+  ignored so newer producers still parse. Every declared (input, output) pair
+  becomes an edge (`provenance=openlineage`), with column-level detail when the
+  output carries a `columnLineage` facet — otherwise table-level, never a column
+  cross-product. A run missing inputs *or* outputs records nothing.
+- **OpenLineage emitter (F-F2)**: Meridian-initiated jobs (maintenance
+  compaction/expiry) render as spec-valid `RunEvent`s (Marquez-compatible
+  shape). When `[lineage].openlineage_url` is set they POST to
+  `<url>/api/v1/lineage`; otherwise they can be pulled from the graph.
+- **Graph (F-F5)**: `GET /api/v2/lineage?asset=<warehouse.ns.table>&depth=<1-20>&direction=<upstream|downstream|both>`
+  — the reachable up/downstream graph (nodes with display idents + depth,
+  deduped edges with provenance/confidence). Unknown `asset` → 404.
+- **Impact (F-F5)**: `GET /api/v2/lineage/impact?asset=<ident>&change=drop_table|drop_column:<name>&depth=`
+  — the downstream blast radius with each affected asset's owner (from its
+  `owner` table property when set, never inferred) collected for notification.
+  For a `drop_column` change, an edge with a column map is followed only when it
+  maps that column (column-precise); a table-level edge with no column map is
+  still reported but flagged `via_column: null` — the link is real but not
+  column-precise. The `impact_of` function is exposed for the incidents wave's
+  blast-radius calls.
+- **Impact CI gate (F-F5)**: `meridian impact --change drop_column:foo --asset
+  ns.table [--fail-on-downstream]` prints the blast radius and, with
+  `--fail-on-downstream`, exits non-zero when the change breaks any downstream
+  asset — drop it into a dbt/SQL CI job to block a breaking change before it
+  merges.
+- **Authorization** (`oidc` mode): all lineage endpoints require management
+  access (admin or any `MANAGE_WAREHOUSE` grant), like events and audit — a
+  lineage graph spans many assets, so no single resource-scoped privilege
+  expresses "may read lineage"; a `READ_LINEAGE` privilege is deliberately
+  deferred.
+
+### Quality: contracts & the circuit breaker (`/api/v2/quality/...`)
+
+Data contracts and commit-time enforcement (Pillar E, E-F3 / E-F4). The
+control plane for the pre-commit hook the commit driver runs; full semantics
+and the commit-invariant preservation argument are in
+[docs/design/contracts-circuit-breaker.md](design/contracts-circuit-breaker.md).
+
+- **Contracts (E-F3)**: `GET`/`POST /api/v2/quality/contracts`,
+  `GET`/`PATCH`/`DELETE /api/v2/quality/contracts/{id}`,
+  `GET /api/v2/quality/contracts/{id}/versions`. A contract is a versioned
+  object bound to a **table** or a **namespace** (all tables under it, resolved
+  at evaluation time), with an enforcement `mode` (`warn` | `quarantine` |
+  `block`) and a typed `spec`: a schema contract (`allowed_evolution` ∈
+  `additive_only` | `no_narrowing` | `none`, `protected_columns`,
+  `required_columns`) and cheap **synchronous** predicates (`non_null` on a
+  column — a schema-level guarantee that the column is `required`, not a
+  data-level null count; `row_count_min`/`row_count_max` read from the snapshot
+  summary's `total-records`, skipped when absent). Every version is retained
+  (append-only history); every mutation writes an audit row + CloudEvent.
+- **Per-table status (E-F3)**:
+  `GET /api/v2/quality/tables/{warehouse}/{ns}/{table}/contracts` — the
+  contracts in force on a table (directly bound + namespace-bound) so a producer
+  can see what governs its writes.
+- **The circuit breaker (E-F4)** runs as a synchronous pre-commit hook in the
+  commit driver (the §3-step-6 seam of the commit protocol), evaluating enabled
+  contracts against the **staged** metadata before the pointer CAS. Schema
+  evolution is classified by stable Iceberg field id: a dropped column, a
+  narrowed type, or an optional→required tighten is a violation; adding columns
+  and spec-legal type widenings (`int→long`, `float→double`,
+  `decimal(P,S)→decimal(P',S)` with `P'≥P`, `date→timestamp`) are allowed.
+  Modes: **block** rejects the commit atomically with a machine-readable
+  `409 CommitFailedException` whose envelope carries a `contract-violation`
+  object (contract id/name, mode, table, `{kind, detail}` violations) — nothing
+  durable, the pointer unchanged; **warn** lets the commit land and records +
+  events the violation *atomically with the swap*; **quarantine** (managed WAP)
+  retargets the violating snapshot onto an Iceberg audit branch (default
+  `meridian_quarantine`) so `main` is **not** advanced — the snapshot is
+  retained and addressable, but no consumer reading `main` sees the bad data. An
+  eval error fails **closed** for block/quarantine (reject) and **open** for
+  warn (land); this is documented, not incidental.
+- **Quarantine publish/discard**:
+  `POST /api/v2/quality/tables/{warehouse}/{ns}/{table}/quarantine/{snapshot}/publish`
+  fast-forwards `main` to the quarantined snapshot and drops the branch;
+  `.../discard` drops the branch and leaves `main` where it is. Both are
+  ordinary catalog commits through the same CAS path — so resolving a quarantine
+  is itself fully audited and invariant-preserving. **Honest depth:** quarantine
+  is single-branch, publish is an explicit human/CI override, and re-validation
+  on publish is not implied; multi-table transactions degrade a quarantine to
+  block (retargeting one table of an atomic set would break the producer's
+  atomicity). See the design doc.
+- **Violations ledger**:
+  `GET /api/v2/quality/violations[?contract_id=&table_id=&limit=]` — every
+  detected violation, newest first, with `commit_rejected` (block) / `quarantined`
+  flags, the `{kind, detail}`, and the head snapshot when known.
+- **Commit-invariant preservation**: the hook adds no new pointer-mutation path
+  and does not touch the CAS, lock order, idempotency recall, or multi-table
+  atomicity. Warn/quarantine violation rows join the *same* transaction as the
+  swap (durable iff the commit is); a block records in its own atomic
+  transaction (the commit transaction never opens). The existing commit
+  property/chaos suite (`commit_properties`, `commit_properties_pg`) passes
+  **unchanged**, and a concurrent-writer-under-contract test confirms no
+  deadlock and no lost updates.
+- **Authorization** (`oidc` mode): all quality endpoints require management
+  access (admin or any `MANAGE_WAREHOUSE` grant) — a contract can bind to a
+  namespace spanning many tables, so it is a cross-resource surface; a dedicated
+  `govern`/`quality` RBAC privilege (needing a migration to the 0005 privilege
+  CHECK) is deferred, and management *is* the govern/quality gate today.
+- **Not yet**: SQL data-quality assertion *execution* (E-F2, needs the
+  executor — the predicates here are the cheap synchronous subset only);
+  create-time enforcement of namespace-bound contracts (the hook runs on commits
+  to existing tables — evolution of a live table, the case that breaks readers,
+  is fully covered).
+
+### Quality: zero-scan monitors, incidents & trust score (`/api/v2/quality/...`)
+
+Detection and operability on top of the contracts control plane (Pillar E,
+E-F1 / E-F5 / E-F6). Monitors are evaluated **off the sacred commit path** by a
+post-commit worker that consumes the durable `table.committed` stream (like the
+lineage worker); every signal is computed from the `table_snapshots`
+write-through index + `metrics_reports` — **no data scan**.
+
+- **Zero-scan monitors (E-F1)**: `GET`/`POST /api/v2/quality/monitors`,
+  `GET`/`PATCH`/`DELETE /api/v2/quality/monitors/{id}`,
+  `GET /api/v2/quality/monitors/results[?monitor_id=&table_id=&limit=]`. A
+  monitor is opt-in per table or namespace and computes one signal: **freshness**
+  (commit recency vs. a learned inter-commit cadence or a declared SLA),
+  **volume** (rows/files/bytes per commit anomaly-scored against the recent
+  median), **schema_change** (any evolution, breaking-change classified via the
+  contract schema-diff), **file_size** (small-file regression), **snapshot_debt**
+  (retained-snapshot / delete-file spikes), or **commit_failure** (a
+  blocked-commit / retry storm). The anomaly scorers are pure and unit-tested;
+  they learn a baseline from a bounded history window and stay quiet until the
+  baseline is trustworthy (no false positives on a new table).
+- **Incidents (E-F5)**: `GET /api/v2/quality/incidents[?table_id=&status=&live=&limit=]`,
+  `GET /api/v2/quality/incidents/{id}`,
+  `POST /api/v2/quality/incidents/{id}/ack`,
+  `POST /api/v2/quality/incidents/{id}/resolve`. A monitor breach (or a contract
+  violation — the circuit-breaker events open incidents too, so the ledger is one
+  pane of glass) opens an incident with a lifecycle (open → acknowledged →
+  resolved), the owner captured from the table's `owner` property (never
+  fabricated), and the **downstream blast radius** from the lineage impact
+  function. A live incident for the same (table, source, kind) is re-touched, not
+  duplicated (a partial-unique index enforces "one live incident per condition").
+  Open/ack/resolve each emit a `quality.incident.*` CloudEvent, so a webhook /
+  Slack integration is driven off the same durable outbox as everything else.
+- **Per-table status (E-F5)**:
+  `GET /api/v2/quality/tables/{warehouse}/{ns}/{table}/status` — the traffic
+  light (green / yellow / red = worst live-incident severity) + live-incident
+  counts; `.../status/history` — the incident open/resolve timeline.
+- **Trust score (E-F6)**:
+  `GET /api/v2/quality/tables/{warehouse}/{ns}/{table}/score` — a composite
+  `0..=100` score (+ letter grade) from five explainable components: monitors
+  passing + coverage, contract present + mode strength, ownership declared, docs
+  coverage, and freshness. Pure weighted math (documented weights), cheap enough
+  to fold onto search results — `GET /api/v2/search` now returns a
+  `quality_score` on each table hit.
+- **Evaluation worker** (`[quality].enabled`, default on): consumes
+  `table.committed` after the commit, builds a zero-scan observation + baseline
+  history from the snapshot index, evaluates every bound monitor, records a
+  result row, and opens incidents on breaches. Crash-safe (durable consumer
+  cursor + incident de-duplication); a poisoned event is logged and skipped, and
+  the worker never blocks or fails a commit.
+- **Authorization** (`oidc` mode): all monitor / incident / status / score
+  endpoints require management access, same gate and rationale as the contracts
+  surface (a namespace monitor spans many tables).
+- **CLI**: `meridian monitor list|create|set|rm|results`,
+  `meridian incident list|ack|resolve`, `meridian quality status|score`.
+- **Console**: a **Quality** page — incidents (with ack/resolve + blast radius),
+  monitors (with create + enable/disable), and a per-table trust-score lookup.
+- **Not yet**: agent-facing score consumption beyond the search boost;
+  per-column data-distribution monitors (those need a scan — E-F2's executor).

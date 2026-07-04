@@ -14,11 +14,18 @@ import type {
   CreateGovPolicyRequest,
   CreateGrantRequest,
   CreateMirrorRequest,
+  CreateMonitorRequest,
   CreateTagRequest,
   CreateWebhookRequest,
   DriftResponse,
   EffectivePolicyResponse,
   FeedResponse,
+  Incident,
+  ListIncidentsResponse,
+  ListMonitorResultsResponse,
+  ListMonitorsResponse,
+  Monitor,
+  QualityScoreResponse,
   GovAssignment,
   GovBinding,
   GovPolicy,
@@ -385,6 +392,53 @@ export const api = {
     ),
   govDrift: (warehouse: string) =>
     request<DriftResponse>(`/api/v2/governance/drift${qs({ warehouse })}`),
+
+  // ---- data quality (Pillar E) ----------------------------------------
+  listMonitors: () =>
+    request<ListMonitorsResponse>("/api/v2/quality/monitors"),
+  createMonitor: (body: CreateMonitorRequest) =>
+    request<Monitor>("/api/v2/quality/monitors", { method: "POST", body }),
+  setMonitorEnabled: (id: string, enabled: boolean) =>
+    request<Monitor>(`/api/v2/quality/monitors/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: { enabled },
+    }),
+  deleteMonitor: (id: string) =>
+    request<void>(`/api/v2/quality/monitors/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      expectNoContent: true,
+    }),
+  listMonitorResults: (params: { monitor_id?: string; table_id?: string; limit?: number }) =>
+    request<ListMonitorResultsResponse>(
+      `/api/v2/quality/monitors/results${qs(params)}`,
+    ),
+  listIncidents: (params: {
+    table_id?: string;
+    status?: string;
+    live?: boolean;
+    limit?: number;
+  }) =>
+    request<ListIncidentsResponse>(
+      `/api/v2/quality/incidents${qs({
+        table_id: params.table_id,
+        status: params.status,
+        live: params.live ? "true" : undefined,
+        limit: params.limit,
+      })}`,
+    ),
+  ackIncident: (id: string) =>
+    request<Incident>(`/api/v2/quality/incidents/${encodeURIComponent(id)}/ack`, {
+      method: "POST",
+    }),
+  resolveIncident: (id: string) =>
+    request<Incident>(
+      `/api/v2/quality/incidents/${encodeURIComponent(id)}/resolve`,
+      { method: "POST" },
+    ),
+  tableQualityScore: (warehouse: string, ns: string[], table: string) =>
+    request<QualityScoreResponse>(
+      `/api/v2/quality/tables/${encodeURIComponent(warehouse)}/${encodeNamespace(ns)}/${encodeURIComponent(table)}/score`,
+    ),
 };
 
 export type Api = typeof api;

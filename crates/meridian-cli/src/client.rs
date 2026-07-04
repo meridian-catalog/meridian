@@ -591,6 +591,95 @@ pub(crate) async fn gov_delete(
     Ok(())
 }
 
+// ---- data quality (Pillar E): monitors, incidents, score, impact ----------
+//
+// These reuse the generic `q_get` / `q_post` verbs against `/api/v2/quality`
+// and `/api/v2/lineage`, keeping the client small (the surface is broad).
+
+/// `GET {path}` under the server base, with optional query params.
+pub(crate) async fn q_get(
+    server: &str,
+    token: Option<&str>,
+    path: &str,
+    query: &[(&str, String)],
+) -> Result<Value, CliError> {
+    let mut request = http_client()?.get(format!("{}{path}", base(server)));
+    if !query.is_empty() {
+        request = request.query(query);
+    }
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
+/// `POST {path}` with an optional JSON body; tolerates an empty (204) body.
+pub(crate) async fn q_post(
+    server: &str,
+    token: Option<&str>,
+    path: &str,
+    body: Option<&Value>,
+) -> Result<Value, CliError> {
+    let mut request = http_client()?.post(format!("{}{path}", base(server)));
+    if let Some(body) = body {
+        request = request.json(body);
+    }
+    let response = with_token(request, token).send().await?;
+    let checked = check(response).await?;
+    let text = checked.text().await?;
+    if text.trim().is_empty() {
+        Ok(Value::Null)
+    } else {
+        serde_json::from_str(&text).map_err(|e| CliError(format!("malformed JSON response: {e}")))
+    }
+}
+
+/// `PATCH {path}` with a JSON body.
+pub(crate) async fn q_patch(
+    server: &str,
+    token: Option<&str>,
+    path: &str,
+    body: &Value,
+) -> Result<Value, CliError> {
+    let request = http_client()?
+        .patch(format!("{}{path}", base(server)))
+        .json(body);
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
+/// `DELETE {path}` (ignores the empty body).
+pub(crate) async fn q_delete(
+    server: &str,
+    token: Option<&str>,
+    path: &str,
+) -> Result<(), CliError> {
+    let request = http_client()?.delete(format!("{}{path}", base(server)));
+    let response = with_token(request, token).send().await?;
+    check(response).await?;
+    Ok(())
+}
+
+/// `GET /api/v2/lineage/impact` — the downstream blast radius of a change.
+/// Returns `(status, body)` so the caller can distinguish a clean 200 from an
+/// error and shape the CI exit code itself.
+pub(crate) async fn impact(
+    server: &str,
+    token: Option<&str>,
+    asset: &str,
+    change: &str,
+    depth: Option<u32>,
+) -> Result<Value, CliError> {
+    let mut query: Vec<(&str, String)> =
+        vec![("asset", asset.to_owned()), ("change", change.to_owned())];
+    if let Some(depth) = depth {
+        query.push(("depth", depth.to_string()));
+    }
+    let request = http_client()?
+        .get(format!("{}/api/v2/lineage/impact", base(server)))
+        .query(&query);
+    let response = with_token(request, token).send().await?;
+    Ok(check(response).await?.json().await?)
+}
+
 /// Renders rows as a plain aligned text table.
 #[must_use]
 pub(crate) fn render_table(headers: &[&str], rows: &[Vec<String>]) -> String {

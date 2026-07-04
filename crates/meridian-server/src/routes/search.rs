@@ -22,7 +22,7 @@ use axum::extract::{Query, State};
 use axum::{Extension, Json};
 use meridian_common::principal::Principal;
 use meridian_store::search::{self, SearchAssetKind, SearchRequest};
-use meridian_store::{tenancy, warehouse};
+use meridian_store::{quality_score, tenancy, warehouse};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -73,6 +73,12 @@ pub struct SearchResult {
     pub rank: f64,
     /// `ts_headline` snippet; matches are wrapped in `**`.
     pub snippet: String,
+    /// The table's composite quality / trust score (E-F6), `0..=100`, when the
+    /// hit is a table (a cheap single-row read per result). `None` for views and
+    /// namespaces (the score is table-scoped). Agents and the console read this
+    /// to prefer trustworthy tables among relevance-comparable hits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality_score: Option<u8>,
 }
 
 /// Response body of `GET /api/v2/search`.
@@ -163,20 +169,35 @@ pub async fn search(
     )
     .await?;
 
+    // Fold the composite quality score onto table hits (E-F6). The page is
+    // bounded (≤100), so this is at most 100 cheap single-row reads — the
+    // "wire into search rank if cheap" the brief calls for, surfaced on the
+    // result rather than reordering (reordering would break the FTS keyset
+    // pagination contract). A scoring error on one hit degrades that hit's
+    // score to absent, never failing the whole search.
+    let mut results = Vec::with_capacity(page.hits.len());
+    for hit in page.hits {
+        let quality_score = if matches!(hit.kind, SearchAssetKind::Table) {
+            quality_score::score_for_search(&state.pool, tenancy::default_workspace_id(), &hit.id)
+                .await
+                .ok()
+        } else {
+            None
+        };
+        results.push(SearchResult {
+            kind: hit.kind.as_str(),
+            id: hit.id,
+            name: hit.name,
+            namespace: hit.namespace,
+            warehouse: hit.warehouse,
+            rank: hit.rank,
+            snippet: hit.snippet,
+            quality_score,
+        });
+    }
+
     Ok(Json(SearchResponse {
-        results: page
-            .hits
-            .into_iter()
-            .map(|hit| SearchResult {
-                kind: hit.kind.as_str(),
-                id: hit.id,
-                name: hit.name,
-                namespace: hit.namespace,
-                warehouse: hit.warehouse,
-                rank: hit.rank,
-                snippet: hit.snippet,
-            })
-            .collect(),
+        results,
         next_page_token: page.next_page_token,
     }))
 }

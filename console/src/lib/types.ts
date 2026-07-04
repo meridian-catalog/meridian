@@ -742,3 +742,110 @@ export interface DriftResponse {
   alert_count: number;
   alerts: DriftAlert[];
 }
+
+// ---- data quality (Pillar E): monitors, incidents, score ----------------
+
+export interface Monitor {
+  id: string;
+  name: string;
+  bound_to: string;
+  securable_id: string;
+  kind: string;
+  enabled: boolean;
+  severity: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ListMonitorsResponse {
+  monitors: Monitor[];
+}
+
+export interface MonitorResult {
+  id: string;
+  monitor_id: string;
+  table_id: string;
+  kind: string;
+  status: string;
+  observed_value: number | null;
+  baseline_value: number | null;
+  result_kind: string;
+  detail: string;
+  snapshot_id: number | null;
+  evaluated_at: string;
+}
+
+export interface ListMonitorResultsResponse {
+  results: MonitorResult[];
+}
+
+export interface BlastRadiusAsset {
+  table_id: string;
+  ident: string | null;
+  owner: string | null;
+  depth: number;
+}
+
+export interface Incident {
+  id: string;
+  table_id: string;
+  table_ident: string;
+  source: string;
+  kind: string;
+  status: string;
+  severity: string;
+  title: string;
+  detail: string;
+  owner: string | null;
+  blast_radius: BlastRadiusAsset[];
+  monitor_id: string | null;
+  occurrence_count: number;
+  acknowledged_by: string | null;
+  acknowledged_at: string | null;
+  resolved_by: string | null;
+  resolved_at: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+}
+
+export interface ListIncidentsResponse {
+  incidents: Incident[];
+}
+
+export interface CreateMonitorRequest {
+  name: string;
+  warehouse: string;
+  bound_to: string;
+  namespace: string;
+  table?: string;
+  kind: string;
+  severity?: string;
+}
+
+export interface QualityScoreComponents {
+  monitors: number;
+  contract: number;
+  ownership: number;
+  docs: number;
+  freshness: number;
+}
+
+export interface QualityScoreResponse {
+  table_id: string;
+  ident: string;
+  score: number;
+  grade: string;
+  components: QualityScoreComponents;
+}
+
+export const MONITOR_KINDS = [
+  "freshness",
+  "volume",
+  "schema_change",
+  "file_size",
+  "snapshot_debt",
+  "commit_failure",
+] as const;
+
+export const MONITOR_SEVERITIES = ["low", "medium", "high"] as const;
