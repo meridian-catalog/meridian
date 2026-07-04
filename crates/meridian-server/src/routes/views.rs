@@ -45,31 +45,33 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use chrono::Utc;
 use meridian_common::MeridianError;
 use meridian_common::principal::Principal;
 use meridian_iceberg::spec::{
-    LAST_ADDED, Schema, ViewMetadata, ViewMetadataBuildError, ViewMetadataBuilder, ViewRequirement,
-    ViewUpdate, ViewVersion,
+    LAST_ADDED, Schema, SqlViewRepresentation, ViewMetadata, ViewMetadataBuildError,
+    ViewMetadataBuilder, ViewRepresentation, ViewRequirement, ViewUpdate, ViewVersion,
 };
 use meridian_storage::{Storage, StorageError, new_view_metadata_location, read_view_metadata};
 use meridian_store::rbac::{Privilege, SecurableScope};
 use meridian_store::view::{ViewCommitError, ViewPointerSwap};
 use meridian_store::warehouse::WarehouseRecord;
-use meridian_store::{namespace, table, tenancy, view};
+use meridian_store::{namespace, semantics, table, tenancy, view};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::AppState;
 use crate::error::ApiError;
-use crate::routes::grants::{namespace_scope_chain, require};
+use crate::routes::grants::{namespace_scope_chain, require, require_management};
 use crate::routes::namespaces::{
     decode_namespace_param, next_page_token, resolve_pagination, resolve_warehouse,
 };
+use crate::sidecar::{SidecarClient, TranspileStatus};
 
 /// Bounded rebase-retry budget for the replace compare-and-set loop, same
 /// as the table commit path (design doc §6).
@@ -261,6 +263,329 @@ fn load_view_result(
         "metadata": metadata_to_value(metadata)?,
         "config": storage_client_config(warehouse),
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Universal views (Pillar G, G-F1): serve the representation matching the
+// requesting engine's dialect, transpiling + caching when absent.
+// ---------------------------------------------------------------------------
+
+/// The representation-extra key that carries a translation's honest status
+/// (`verified` | `best_effort` | `unsupported`) into the dialect-tagged Iceberg
+/// SQL representation. A representation Meridian did not synthesize (the
+/// author's own) carries no such key.
+const TRANSPILE_STATUS_KEY: &str = "meridian.transpile-status";
+
+/// The representation-extra key that marks a representation as synthesized by
+/// Meridian's transpiler (vs. authored). Lets callers and the console
+/// distinguish a translation from an original.
+const TRANSPILE_ORIGIN_KEY: &str = "meridian.transpile-origin";
+
+/// Query parameters accepted on `loadView`. `engine` is the explicit
+/// requesting-engine dialect override (the console and migration tools set it);
+/// when absent the dialect is inferred from the `User-Agent`.
+#[derive(Debug, Default, Deserialize)]
+pub struct LoadViewQuery {
+    /// The requesting engine's SQL dialect (e.g. `trino`, `duckdb`). An explicit
+    /// override; wins over `User-Agent` inference.
+    pub engine: Option<String>,
+}
+
+/// Resolves the requesting engine's dialect for a `loadView`, in priority
+/// order: the explicit `?engine=` override, then `User-Agent` inference, then
+/// `None` (serve the view as authored, no transpilation).
+///
+/// Engine identification is deliberately conservative: only well-known clients
+/// map by `User-Agent`, and an unrecognized agent yields `None` rather than a
+/// guess (a wrong dialect would be worse than none). The `?engine=` override is
+/// the escape hatch for anything the agent map does not cover.
+fn resolve_requesting_dialect(query: &LoadViewQuery, headers: &HeaderMap) -> Option<String> {
+    if let Some(engine) = query.engine.as_deref()
+        && !engine.trim().is_empty()
+    {
+        return Some(normalize_dialect(engine));
+    }
+    let agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())?
+        .to_ascii_lowercase();
+    dialect_from_user_agent(&agent)
+}
+
+/// Maps a lowercased `User-Agent` to a `SQLGlot` dialect, for the engines whose
+/// clients identify themselves. Returns `None` for anything not recognized —
+/// Meridian never fabricates a dialect binding.
+fn dialect_from_user_agent(agent: &str) -> Option<String> {
+    // Ordered by specificity; the first contained marker wins.
+    const MARKERS: &[(&str, &str)] = &[
+        ("trino", "trino"),
+        ("presto", "presto"),
+        ("snowflake", "snowflake"),
+        ("duckdb", "duckdb"),
+        ("clickhouse", "clickhouse"),
+        ("starrocks", "starrocks"),
+        ("bigquery", "bigquery"),
+        ("spark", "spark"),
+        ("pyspark", "spark"),
+        ("dremio", "dremio"),
+        ("postgres", "postgres"),
+        // PyIceberg reads views but does not execute SQL; treat it as DuckDB,
+        // its default local query engine, so a translation is still offered.
+        ("pyiceberg", "duckdb"),
+    ];
+    MARKERS
+        .iter()
+        .find(|(marker, _)| agent.contains(marker))
+        .map(|(_, dialect)| (*dialect).to_owned())
+}
+
+/// Lowercases and trims a dialect string (the cache and the `SQLGlot` dialect
+/// namespace are case-insensitive).
+fn normalize_dialect(dialect: &str) -> String {
+    dialect.trim().to_ascii_lowercase()
+}
+
+/// The canonical SQL representation of a view's current version: the one the
+/// author wrote (or the first SQL representation present). Translations are
+/// derived from this. Returns `None` for a view whose current version carries
+/// no SQL representation (nothing to translate).
+fn canonical_representation(metadata: &ViewMetadata) -> Option<&SqlViewRepresentation> {
+    metadata
+        .current_version()?
+        .representations
+        .iter()
+        .find_map(ViewRepresentation::as_sql)
+}
+
+/// sha256 (hex) of a canonical SQL string — the cache key component that ties a
+/// cached translation to a specific view definition.
+fn sql_hash(sql: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(sql.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// True when the current version already carries a SQL representation for
+/// `dialect` (case-insensitively) — in which case no translation is needed.
+fn has_representation_for(metadata: &ViewMetadata, dialect: &str) -> bool {
+    metadata.current_version().is_some_and(|version| {
+        version.representations.iter().any(|r| {
+            r.as_sql()
+                .is_some_and(|sql| normalize_dialect(&sql.dialect) == dialect)
+        })
+    })
+}
+
+/// The outcome of resolving a requesting dialect against a view: what to serve
+/// and the honest status to report.
+struct TranspileOutcome {
+    /// A representation to fold into the served metadata's current version, if
+    /// one was produced (present for `verified`/`best_effort`; absent for
+    /// unsupported or when serving the canonical form on a sidecar outage).
+    representation: Option<SqlViewRepresentation>,
+    /// The honest status label to surface in the response's transpile note.
+    status: &'static str,
+    /// A human-readable note (diagnostics summary, or the degradation reason).
+    note: String,
+    /// The target dialect this outcome is about.
+    dialect: String,
+}
+
+/// Resolves a translation of `metadata` into `target_dialect`: serves an
+/// existing representation when present, else transpiles the canonical one via
+/// the sidecar, caching the result. Never errors on a sidecar outage — it
+/// degrades to serving the canonical form with an honest note.
+///
+/// The write to the durable cache is best-effort: a cache-write failure is
+/// logged and never affects what is served.
+async fn resolve_transpilation(
+    state: &AppState,
+    sidecar: Option<&SidecarClient>,
+    view_id: &str,
+    metadata: &ViewMetadata,
+    target_dialect: &str,
+) -> TranspileOutcome {
+    // Already present in the metadata (authored or previously folded): serve it.
+    if has_representation_for(metadata, target_dialect) {
+        return TranspileOutcome {
+            representation: None,
+            status: "verified",
+            note: format!("view already carries a {target_dialect} representation"),
+            dialect: target_dialect.to_owned(),
+        };
+    }
+
+    let Some(canonical) = canonical_representation(metadata) else {
+        return TranspileOutcome {
+            representation: None,
+            status: "unsupported",
+            note: "view has no SQL representation to translate".to_owned(),
+            dialect: target_dialect.to_owned(),
+        };
+    };
+    let source_dialect = normalize_dialect(&canonical.dialect);
+    // A view authored in the requested dialect needs no translation (defensive:
+    // has_representation_for already covered the exact-match case).
+    if source_dialect == target_dialect {
+        return TranspileOutcome {
+            representation: None,
+            status: "verified",
+            note: format!("view is authored in {target_dialect}"),
+            dialect: target_dialect.to_owned(),
+        };
+    }
+    let hash = sql_hash(&canonical.sql);
+
+    // Cache hit? Serve it (an unsupported entry short-circuits the sidecar).
+    match semantics::get_cached_translation(&state.pool, view_id, target_dialect, &hash).await {
+        Ok(Some(cached)) => return outcome_from_cache(&cached, target_dialect),
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(%error, view = %view_id, "view translation cache read failed; \
+                transpiling fresh");
+        }
+    }
+
+    // Cache miss: transpile via the sidecar. A sidecar outage degrades to the
+    // canonical form with a note — never a 500.
+    let Some(sidecar) = sidecar else {
+        return TranspileOutcome {
+            representation: None,
+            status: "unsupported",
+            note: "transpilation sidecar is not configured; serving the canonical representation"
+                .to_owned(),
+            dialect: target_dialect.to_owned(),
+        };
+    };
+
+    match sidecar
+        .transpile(&canonical.sql, &source_dialect, target_dialect)
+        .await
+    {
+        Ok(response) => {
+            let status = response.status.as_str();
+            let note = summarize_diagnostics(&response.diagnostics)
+                .unwrap_or_else(|| format!("translated {source_dialect} -> {target_dialect}"));
+            let diagnostics_json: Vec<Value> = response
+                .diagnostics
+                .iter()
+                .map(|d| json!({ "severity": d.severity, "code": d.code, "message": d.message }))
+                .collect();
+
+            // Persist to the durable cache (best-effort: never blocks serving).
+            if let Err(error) = semantics::upsert_cached_translation(
+                &state.pool,
+                tenancy::default_workspace_id(),
+                view_id,
+                target_dialect,
+                &source_dialect,
+                &hash,
+                response.sql.as_deref(),
+                status,
+                &diagnostics_json,
+            )
+            .await
+            {
+                tracing::warn!(%error, view = %view_id, "failed to persist view translation cache");
+            }
+
+            let representation = response
+                .sql
+                .filter(|_| response.status != TranspileStatus::Unsupported)
+                .map(|sql| synthesized_representation(&sql, target_dialect, status));
+
+            TranspileOutcome {
+                representation,
+                status,
+                note,
+                dialect: target_dialect.to_owned(),
+            }
+        }
+        Err(error) => {
+            // Transport failure: degrade gracefully.
+            tracing::warn!(%error, view = %view_id, "sidecar transpile failed; \
+                serving canonical representation");
+            TranspileOutcome {
+                representation: None,
+                status: "unsupported",
+                note: format!(
+                    "transpilation unavailable ({error}); serving the canonical representation"
+                ),
+                dialect: target_dialect.to_owned(),
+            }
+        }
+    }
+}
+
+/// Builds a [`TranspileOutcome`] from a cache row.
+fn outcome_from_cache(
+    cached: &semantics::ViewRepresentationCacheRecord,
+    target_dialect: &str,
+) -> TranspileOutcome {
+    let status: &'static str = match cached.status.as_str() {
+        "verified" => "verified",
+        "best_effort" => "best_effort",
+        _ => "unsupported",
+    };
+    let representation = cached
+        .translated_sql
+        .as_deref()
+        .filter(|_| status != "unsupported")
+        .map(|sql| synthesized_representation(sql, target_dialect, status));
+    TranspileOutcome {
+        representation,
+        status,
+        note: format!("served from translation cache ({status})"),
+        dialect: target_dialect.to_owned(),
+    }
+}
+
+/// Builds a dialect-tagged SQL representation carrying Meridian's transpile
+/// status in its `extra` map (so the multi-representation form is honest and
+/// self-describing, even to a non-Meridian reader).
+fn synthesized_representation(sql: &str, dialect: &str, status: &str) -> SqlViewRepresentation {
+    let mut representation = SqlViewRepresentation::new(sql.to_owned(), dialect.to_owned());
+    representation.extra.insert(
+        TRANSPILE_STATUS_KEY.to_owned(),
+        Value::String(status.to_owned()),
+    );
+    representation.extra.insert(
+        TRANSPILE_ORIGIN_KEY.to_owned(),
+        Value::String("meridian-transpile".to_owned()),
+    );
+    representation
+}
+
+/// A one-line summary of the highest-severity diagnostic, if any.
+fn summarize_diagnostics(diagnostics: &[crate::sidecar::Diagnostic]) -> Option<String> {
+    diagnostics
+        .iter()
+        .find(|d| d.severity == "error")
+        .or_else(|| diagnostics.iter().find(|d| d.severity == "warning"))
+        .or_else(|| diagnostics.first())
+        .map(|d| d.message.clone())
+}
+
+/// Folds a synthesized representation into a clone of `metadata`'s current
+/// version so the served body carries the requesting dialect. The clone leaves
+/// the stored metadata untouched (the durable cache is the persistence path);
+/// this is purely the response projection.
+fn with_folded_representation(
+    metadata: &ViewMetadata,
+    representation: &SqlViewRepresentation,
+) -> ViewMetadata {
+    let mut clone = metadata.clone();
+    let current_id = clone.current_version_id;
+    if let Some(version) = clone
+        .versions
+        .iter_mut()
+        .find(|v| v.version_id == current_id)
+    {
+        version
+            .representations
+            .push(ViewRepresentation::Sql(representation.clone()));
+    }
+    clone
 }
 
 /// Maps view-builder rejections to the IRC error surface. Every variant is
@@ -629,10 +954,23 @@ async fn resolve_view(
 }
 
 /// `GET /{prefix}/namespaces/{namespace}/views/{view}` — load a view.
+///
+/// **Universal views (G-F1):** when the requesting engine's dialect is
+/// resolvable (via `?engine=` or the `User-Agent`) and the view does not already
+/// carry a representation for it, Meridian transpiles the canonical
+/// representation to that dialect via the sidecar, caches it, folds it into the
+/// served `metadata` (dialect-tagged, carrying a `meridian.transpile-status`),
+/// and reports the honest status under a `meridian-transpile` field of the
+/// response. A sidecar outage degrades gracefully: the canonical representation
+/// is served with a status note, never a 500. Requests that name no engine get
+/// the view exactly as authored.
 pub async fn load_view(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
+    Extension(sidecar): Extension<Option<SidecarClient>>,
     Path((prefix, raw_namespace, name)): Path<(String, String, String)>,
+    Query(query): Query<LoadViewQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let (warehouse, levels, record) = resolve_view(&state, &prefix, &raw_namespace, &name).await?;
     let chain = namespace_scope_chain(&state.pool, &warehouse.id, &levels).await?;
@@ -652,7 +990,36 @@ pub async fn load_view(
         .await
         .map_err(|e| current_metadata_unreadable(&metadata_location, &e))?;
 
-    let body = load_view_result(&warehouse, &metadata_location, &metadata)?;
+    // Universal-view transpilation: serve the requesting engine's dialect.
+    let transpile_note = match resolve_requesting_dialect(&query, &headers) {
+        Some(target_dialect) => {
+            let outcome = resolve_transpilation(
+                &state,
+                sidecar.as_ref(),
+                &record.id,
+                &metadata,
+                &target_dialect,
+            )
+            .await;
+            let served = match &outcome.representation {
+                Some(representation) => with_folded_representation(&metadata, representation),
+                None => metadata.clone(),
+            };
+            let note = json!({
+                "requested_dialect": outcome.dialect,
+                "status": outcome.status,
+                "note": outcome.note,
+            });
+            (served, Some(note))
+        }
+        None => (metadata, None),
+    };
+    let (served_metadata, note) = transpile_note;
+
+    let mut body = load_view_result(&warehouse, &metadata_location, &served_metadata)?;
+    if let (Value::Object(map), Some(note)) = (&mut body, note) {
+        map.insert("meridian-transpile".to_owned(), note);
+    }
     Ok((StatusCode::OK, Json(body)).into_response())
 }
 
@@ -943,6 +1310,84 @@ pub async fn rename_view(
     })?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v2/sql/transpile — standalone transpile passthrough (G-F1)
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /api/v2/sql/transpile`.
+#[derive(Debug, Deserialize)]
+pub struct TranspileApiRequest {
+    /// The statement to translate.
+    pub sql: String,
+    /// Source SQL dialect.
+    pub from_dialect: String,
+    /// Target SQL dialect.
+    pub to_dialect: String,
+}
+
+/// `POST /api/v2/sql/transpile` — a standalone dialect-translation endpoint
+/// (G-F1). Useful for migrations and as a quiet demo magnet: paste SQL, name the
+/// two dialects, get back the translation with its honest `verified` /
+/// `best_effort` / `unsupported` status and diagnostics. Deterministic `SQLGlot`
+/// first via the sidecar; the optional LLM-assist fallback (if configured on the
+/// sidecar) is labelled and validated, never trusted blindly.
+///
+/// Management-gated: transpilation touches no catalog data, but it is an
+/// operator tool, not an anonymous surface. A sidecar outage is a
+/// `503 ServiceUnavailableException` (the caller can retry), never a 500.
+pub async fn transpile_sql(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(sidecar): Extension<Option<SidecarClient>>,
+    Json(request): Json<TranspileApiRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_management(&state.pool, &principal).await?;
+
+    if request.sql.trim().is_empty() {
+        return Err(ApiError::bad_request("sql must not be empty"));
+    }
+    let from_dialect = normalize_dialect(&request.from_dialect);
+    let to_dialect = normalize_dialect(&request.to_dialect);
+    if from_dialect.is_empty() || to_dialect.is_empty() {
+        return Err(ApiError::bad_request(
+            "from_dialect and to_dialect must not be empty",
+        ));
+    }
+
+    let Some(sidecar) = sidecar else {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "ServiceUnavailableException",
+            "the transpilation sidecar is not configured",
+        ));
+    };
+
+    match sidecar
+        .transpile(&request.sql, &from_dialect, &to_dialect)
+        .await
+    {
+        Ok(response) => {
+            let diagnostics: Vec<Value> = response
+                .diagnostics
+                .iter()
+                .map(|d| json!({ "severity": d.severity, "code": d.code, "message": d.message }))
+                .collect();
+            Ok(Json(json!({
+                "sql": response.sql,
+                "status": response.status.as_str(),
+                "from_dialect": response.from_dialect,
+                "to_dialect": response.to_dialect,
+                "diagnostics": diagnostics,
+            })))
+        }
+        Err(error) => Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "ServiceUnavailableException",
+            format!("transpilation sidecar is unavailable: {error}"),
+        )),
+    }
 }
 
 #[cfg(test)]
