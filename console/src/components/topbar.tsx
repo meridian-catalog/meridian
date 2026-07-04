@@ -17,6 +17,7 @@ const NAV = [
   { href: "/ops", label: "Ops" },
   { href: "/quality", label: "Quality" },
   { href: "/semantics", label: "Semantics" },
+  { href: "/sharing", label: "Sharing" },
   { href: "/federation", label: "Federation" },
   { href: "/governance", label: "Governance" },
   { href: "/policies", label: "Policies" },

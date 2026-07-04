@@ -13,9 +13,9 @@
 //! Tables and views share one name space per namespace (the REST spec 409s
 //! a create/rename whose identifier "already exists as a table or view").
 //! The views side of that invariant is enforced here: create and rename
-//! check the `tables` table inside their transactions. The tables side
-//! (table create/rename colliding with an existing view) lives in
-//! [`crate::table`]'s call sites and is tracked in `docs/api-status.md`.
+//! check the `tables` table inside their transactions. The tables side is
+//! the mirror image in [`crate::table`] (create/rename check the `views`
+//! table); together they enforce the shared name space in both directions.
 
 use std::collections::BTreeMap;
 

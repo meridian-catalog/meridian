@@ -553,6 +553,7 @@ async fn view_404s_use_exact_exception_types() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // both directions of the shared name space in one scenario
 async fn tables_and_views_share_one_name_space() {
     let Some(ctx) = test_ctx().await else { return };
     make_namespace(&ctx, "db").await;
@@ -610,6 +611,116 @@ async fn tables_and_views_share_one_name_space() {
     // The view still loads under its original name (nothing was applied).
     let (status, _) = send(&ctx.router, "HEAD", &view_url(&ctx, "db", "mover"), None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // --- Tables side of the shared name space (the mirror of the above) ---
+
+    // A table may not take a view's name; the 409 must name the collision as
+    // a view.
+    let (status, body) = send(
+        &ctx.router,
+        "POST",
+        &format!("/v1/{}/namespaces/db/tables", ctx.warehouse),
+        Some(json!({ "name": "occupied_by_view", "schema": simple_schema() })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_error(&body, 409, "AlreadyExistsException");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("view")),
+        "the 409 must say the name is taken by a view: {body}"
+    );
+
+    // registerTable lives on the same shared name space: adopting a metadata
+    // file under a view's name is a 409 too. (A donor table supplies a real
+    // metadata file; the collision is caught before it is ever read.)
+    let (status, donor) = send(
+        &ctx.router,
+        "POST",
+        &format!("/v1/{}/namespaces/db/tables", ctx.warehouse),
+        Some(json!({ "name": "reg_donor", "schema": simple_schema() })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create donor table: {donor}");
+    let donor_location = donor["metadata-location"]
+        .as_str()
+        .expect("donor metadata-location");
+    let (status, body) = send(
+        &ctx.router,
+        "POST",
+        &format!("/v1/{}/namespaces/db/register", ctx.warehouse),
+        Some(json!({ "name": "occupied_by_view", "metadata-location": donor_location })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_error(&body, 409, "AlreadyExistsException");
+
+    // Renaming a table onto a view's name: 409 (enforced in the store's
+    // rename transaction).
+    make_table(&ctx, "db", "table_mover").await;
+    let (status, body) = send(
+        &ctx.router,
+        "POST",
+        &format!("/v1/{}/tables/rename", ctx.warehouse),
+        Some(json!({
+            "source": { "namespace": ["db"], "name": "table_mover" },
+            "destination": { "namespace": ["db"], "name": "occupied_by_view" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_error(&body, 409, "AlreadyExistsException");
+
+    // The table mover still loads under its original name (nothing applied).
+    let (status, _) = send(
+        &ctx.router,
+        "HEAD",
+        &format!("/v1/{}/namespaces/db/tables/table_mover", ctx.warehouse),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+// ---------------------------------------------------------------------------
+// dropNamespace accounts for views, not just child namespaces and tables
+// ---------------------------------------------------------------------------
+
+/// A namespace whose only content is a view must refuse to drop with a 409
+/// `NamespaceNotEmptyException` — not surface the `views` → `namespaces`
+/// `ON DELETE RESTRICT` foreign key as a 500 — and must drop cleanly once the
+/// view is gone.
+#[tokio::test]
+async fn drop_namespace_rejects_a_namespace_that_still_holds_a_view() {
+    let Some(ctx) = test_ctx().await else { return };
+    make_namespace(&ctx, "db").await;
+    make_view(&ctx, "db", "events_agg").await;
+
+    let ns_url = format!("/v1/{}/namespaces/db", ctx.warehouse);
+
+    // A view alone keeps the namespace non-empty: 409, not the foreign key's 500.
+    let (status, body) = send(&ctx.router, "DELETE", &ns_url, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_error(&body, 409, "NamespaceNotEmptyException");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("view")),
+        "the 409 must name a remaining view as what keeps the namespace non-empty: {body}"
+    );
+
+    // Drop the view, then the now-empty namespace drops cleanly.
+    let (status, _) = send(
+        &ctx.router,
+        "DELETE",
+        &view_url(&ctx, "db", "events_agg"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body) = send(&ctx.router, "DELETE", &ns_url, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
 }
 
 // ---------------------------------------------------------------------------
@@ -739,6 +850,114 @@ async fn create_view_treats_request_field_ids_as_provisional() {
                 ],
                 "default-namespace": ["db"],
             },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "duplicate names: {body}");
+}
+
+/// `CREATE OR REPLACE VIEW` from Spark 3.5 sends the same 0-based field ids on
+/// the `add-schema` update of the replace commit as it does on create.
+/// Replacing an *existing* view must succeed, with the replacement schema
+/// getting fresh 1-based ids server-side — the same provisional-id treatment
+/// `createView` applies, so the same statement behaves identically whether or
+/// not the view already existed. Previously this failed with
+/// `field id 0 is not positive`.
+#[tokio::test]
+async fn replace_view_treats_request_field_ids_as_provisional() {
+    let Some(ctx) = test_ctx().await else { return };
+    make_namespace(&ctx, "db").await;
+    let (_location, uuid) = make_view(&ctx, "db", "orders_by_category").await;
+
+    let (status, body) = send(
+        &ctx.router,
+        "POST",
+        &view_url(&ctx, "db", "orders_by_category"),
+        Some(json!({
+            "identifier": { "namespace": ["db"], "name": "orders_by_category" },
+            "requirements": [ { "type": "assert-view-uuid", "uuid": uuid } ],
+            "updates": [
+                { "action": "add-schema", "schema": {
+                    "type": "struct",
+                    "schema-id": 0,
+                    "fields": [
+                        { "id": 0, "name": "category", "required": false, "type": "string" },
+                        { "id": 1, "name": "cnt", "required": false, "type": "long" },
+                        { "id": 2, "name": "total_amount", "required": false, "type": "double" },
+                    ],
+                }},
+                { "action": "add-view-version", "view-version": {
+                    "version-id": 0,
+                    "timestamp-ms": 1_700_000_100_000i64,
+                    "schema-id": -1,
+                    "summary": { "engine-name": "spark", "engine-version": "3.5.6" },
+                    "representations": [
+                        { "type": "sql",
+                          "sql": "SELECT category, count(*) AS cnt FROM db.orders GROUP BY category",
+                          "dialect": "spark" },
+                    ],
+                    "default-namespace": ["db"],
+                }},
+                { "action": "set-current-view-version", "view-version-id": -1 },
+            ],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "Spark-shaped replace view: {body}");
+
+    // The replacement version's schema carries fresh 1-based ids.
+    let current_id = body["metadata"]["current-version-id"]
+        .as_i64()
+        .expect("current-version-id");
+    let schema_id = body["metadata"]["versions"]
+        .as_array()
+        .expect("versions")
+        .iter()
+        .find(|v| v["version-id"].as_i64() == Some(current_id))
+        .expect("current version present")["schema-id"]
+        .as_i64()
+        .expect("schema-id");
+    let new_schema = body["metadata"]["schemas"]
+        .as_array()
+        .expect("schemas")
+        .iter()
+        .find(|s| s["schema-id"].as_i64() == Some(schema_id))
+        .expect("replacement schema present");
+    let ids: Vec<i64> = new_schema["fields"]
+        .as_array()
+        .expect("schema fields")
+        .iter()
+        .map(|f| f["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, vec![1, 2, 3], "fresh 1-based ids on replace: {body}");
+
+    // Genuinely broken requests still fail: duplicate sibling field names are
+    // unresolvable once ids are reassigned, exactly as on create.
+    let (status, body) = send(
+        &ctx.router,
+        "POST",
+        &view_url(&ctx, "db", "orders_by_category"),
+        Some(json!({
+            "updates": [
+                { "action": "add-schema", "schema": {
+                    "type": "struct",
+                    "fields": [
+                        { "id": 0, "name": "dup", "required": false, "type": "string" },
+                        { "id": 1, "name": "dup", "required": false, "type": "long" },
+                    ],
+                }},
+                { "action": "add-view-version", "view-version": {
+                    "version-id": 0,
+                    "timestamp-ms": 1_700_000_200_000i64,
+                    "schema-id": -1,
+                    "summary": {},
+                    "representations": [
+                        { "type": "sql", "sql": "SELECT 1", "dialect": "spark" },
+                    ],
+                    "default-namespace": ["db"],
+                }},
+                { "action": "set-current-view-version", "view-version-id": -1 },
+            ],
         })),
     )
     .await;

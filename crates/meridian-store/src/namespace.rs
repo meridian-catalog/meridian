@@ -167,6 +167,22 @@ pub async fn create(
     Ok(record)
 }
 
+/// Loads a namespace by its ULID.
+///
+/// The reverse of the levels-based [`get`]: used where a caller holds a
+/// `namespace_id` (e.g. from a table record) and needs its warehouse + levels
+/// (the data-sharing recipient endpoint resolves a shared table's namespace
+/// this way).
+pub async fn get_by_id(pool: &PgPool, id: &str) -> Result<Option<NamespaceRecord>> {
+    sqlx::query_as(&format!(
+        "SELECT {SELECT_COLUMNS} FROM namespaces WHERE id = $1"
+    ))
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| map_sqlx_error("failed to load namespace by id", e))
+}
+
 /// Loads a namespace by its exact levels.
 pub async fn get(
     pool: &PgPool,
@@ -218,8 +234,8 @@ pub async fn list(
 /// atomically.
 ///
 /// Returns [`MeridianError::NotFound`] when the namespace does not exist and
-/// [`MeridianError::Conflict`] when it still contains child namespaces or
-/// tables.
+/// [`MeridianError::Conflict`] when it still contains child namespaces,
+/// tables, or views.
 pub async fn delete(
     pool: &PgPool,
     workspace_id: WorkspaceId,
@@ -275,6 +291,18 @@ pub async fn delete(
     if table_count > 0 {
         return Err(MeridianError::Conflict(format!(
             "namespace {:?} is not empty: {table_count} table(s) remain",
+            display_levels(levels)
+        )));
+    }
+
+    let view_count: i64 = sqlx::query_scalar("SELECT count(*) FROM views WHERE namespace_id = $1")
+        .bind(&id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| map_sqlx_error("failed to count namespace views", e))?;
+    if view_count > 0 {
+        return Err(MeridianError::Conflict(format!(
+            "namespace {:?} is not empty: {view_count} view(s) remain",
             display_levels(levels)
         )));
     }

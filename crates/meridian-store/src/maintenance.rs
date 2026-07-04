@@ -5,7 +5,7 @@
 //! - **Policies** ([`create_policy`], [`resolve_effective`], …): declarative
 //!   per-scope maintenance configuration. A table's *effective* policy is the
 //!   most-specific matching scope — table beats namespace beats warehouse.
-//! - **Jobs** ([`enqueue_job`], [`claim_next`], [`start_job`], [`complete_job`],
+//! - **Jobs** ([`enqueue_job`], [`claim_next`], [`complete_job`],
 //!   [`fail_job`], [`cancel_job`]): the Postgres work queue. Workers claim
 //!   with `FOR UPDATE SKIP LOCKED`, per-tenant fair (oldest queued job across
 //!   the least-recently-served workspace first). Every state transition is a

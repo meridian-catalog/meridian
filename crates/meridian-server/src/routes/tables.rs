@@ -83,7 +83,7 @@ use meridian_store::commit::{
 use meridian_store::contracts;
 use meridian_store::rbac::{Privilege, SecurableScope};
 use meridian_store::warehouse::WarehouseRecord;
-use meridian_store::{audit, namespace, table, tenancy};
+use meridian_store::{audit, namespace, table, tenancy, view};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -386,6 +386,17 @@ fn commit_backend(state: &AppState, principal: &Principal) -> PostgresCommitBack
         state.pool.clone(),
         tenancy::default_workspace_id(),
         principal.audit_string(),
+    )
+}
+
+/// Builds a commit backend from an audit string (the branch-merge path in
+/// `crate::routes::branches` already holds the principal's audit string, not
+/// the `Principal`).
+pub(crate) fn commit_backend_for(state: &AppState, principal_audit: &str) -> PostgresCommitBackend {
+    PostgresCommitBackend::new(
+        state.pool.clone(),
+        tenancy::default_workspace_id(),
+        principal_audit.to_owned(),
     )
 }
 
@@ -694,7 +705,7 @@ fn map_build_error(error: &MetadataBuildError) -> ApiError {
 }
 
 /// Extracts the write-through index state from new metadata (ADR 003).
-fn derived_state(metadata: &TableMetadata) -> DerivedTableState {
+pub(crate) fn derived_state(metadata: &TableMetadata) -> DerivedTableState {
     let current = metadata.current_snapshot_id.filter(|id| *id >= 0);
     let snapshots: Vec<SnapshotIndexRow> = metadata
         .snapshots
@@ -856,12 +867,25 @@ pub async fn create_table(
     reject_if_foreign_warehouse(&ctx.warehouse)?;
     validate_table_name(&request.name)?;
 
+    // Fast-path collision checks for exact 409 messages; the store's create
+    // transaction re-checks both under its insert (shared table/view name
+    // space).
     if table::get(&state.pool, &ctx.namespace.id, &request.name)
         .await?
         .is_some()
     {
         return Err(ApiError::already_exists(format!(
             "table {:?} already exists",
+            display_ident(&ctx.levels, &request.name)
+        )));
+    }
+    if view::get(&state.pool, &ctx.namespace.id, &request.name)
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::already_exists(format!(
+            "the identifier {:?} already exists as a view \
+             (tables and views share a namespace)",
             display_ident(&ctx.levels, &request.name)
         )));
     }
@@ -949,6 +973,10 @@ pub(crate) async fn resolve_table(
     raw_namespace: &str,
     name: &str,
 ) -> Result<(WarehouseRecord, Vec<String>, table::TableRecord), ApiError> {
+    // A `warehouse@branch` prefix (K-F2) addresses the same table row as its
+    // base warehouse — only the pointer differs, resolved by the caller via the
+    // catalog ref. `resolve_warehouse` resolves the base warehouse from either
+    // prefix form, so branch-prefixed loads/commits find the table row.
     let warehouse = resolve_warehouse(&state.pool, prefix).await?;
     let levels = decode_namespace_param(raw_namespace)?;
     let record = table::get_by_name(&state.pool, &warehouse.id, &levels, name)
@@ -1018,7 +1046,45 @@ pub async fn load_table(
         }
     };
 
-    let etag = table_etag(&record.table_uuid, record.pointer_version, refs_only);
+    // Branch-as-catalog (K-F2): on a `warehouse@branch` prefix, resolve the
+    // table's pointer through the branch overlay — the branch's diverged
+    // metadata.json if the table has diverged, else a fall-through to main.
+    // The etag encodes the branch pointer version so branch and main loads
+    // carry distinct validators (a branch commit does not invalidate a main
+    // cached load and vice versa).
+    let (_base, branch_suffix) = super::namespaces::split_prefix(&prefix);
+    let (effective_location, effective_version) = if let Some(branch) = branch_suffix {
+        // The base warehouse was resolved by resolve_table; look the branch/tag
+        // up by name within the workspace (the prefix carried it).
+        let record_branch = meridian_store::branches::get_by_name(
+            &state.pool,
+            meridian_store::tenancy::default_workspace_id(),
+            branch,
+        )
+        .await?
+        .filter(|b| b.state != "deleted")
+        .ok_or_else(|| ApiError::no_such_warehouse(&prefix))?;
+        // A tag reads its frozen pointer set (catalog_tags); a branch reads its
+        // divergent overlay (branch_table_pointers). Both fall through to main
+        // for a table they do not carry.
+        let pointer = if record_branch.is_tag() {
+            meridian_store::branches::resolve_tag_pointer(
+                &state.pool,
+                &record_branch.id,
+                &record.id,
+            )
+            .await?
+        } else {
+            meridian_store::branches::resolve_pointer(&state.pool, &record_branch.id, &record.id)
+                .await?
+        }
+        .ok_or_else(|| no_such_table(&levels, &name))?;
+        (Some(pointer.metadata_location), pointer.pointer_version)
+    } else {
+        (record.metadata_location.clone(), record.pointer_version)
+    };
+
+    let etag = table_etag(&record.table_uuid, effective_version, refs_only);
     if if_none_match_matches(&headers, &etag) {
         // A 304 carries no body, only the validator.
         let mut response = StatusCode::NOT_MODIFIED.into_response();
@@ -1028,7 +1094,7 @@ pub async fn load_table(
         return Ok(response);
     }
 
-    let Some(metadata_location) = record.metadata_location.clone() else {
+    let Some(metadata_location) = effective_location else {
         return Err(no_such_table(&levels, &name));
     };
     // A foreign (mirrored) table's metadata lives in the source catalog's
@@ -1107,7 +1173,7 @@ fn retain_referenced_snapshots(metadata: &mut TableMetadata) {
 
 /// The pointer references a file that cannot be read back — catalog-side
 /// corruption, surfaced loudly (this is never a client mistake).
-fn current_metadata_unreadable(location: &str, error: &StorageError) -> ApiError {
+pub(crate) fn current_metadata_unreadable(location: &str, error: &StorageError) -> ApiError {
     ApiError::new(
         StatusCode::INTERNAL_SERVER_ERROR,
         "InternalServerError",
@@ -1313,12 +1379,25 @@ pub async fn register_table(
         ));
     }
 
+    // Fast-path collision checks for exact 409 messages; the store's create
+    // transaction re-checks both under its insert (shared table/view name
+    // space).
     if table::get(&state.pool, &ctx.namespace.id, &request.name)
         .await?
         .is_some()
     {
         return Err(ApiError::already_exists(format!(
             "table {:?} already exists",
+            display_ident(&ctx.levels, &request.name)
+        )));
+    }
+    if view::get(&state.pool, &ctx.namespace.id, &request.name)
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::already_exists(format!(
+            "the identifier {:?} already exists as a view \
+             (tables and views share a namespace)",
             display_ident(&ctx.levels, &request.name)
         )));
     }
@@ -1411,6 +1490,11 @@ pub async fn report_metrics(
 
 /// `POST /{prefix}/namespaces/{namespace}/tables/{table}` — commit updates
 /// to one table (`CommitTableRequest` → `CommitTableResponse`).
+// The commit endpoint's dispatch (authz + foreign guards + branch routing +
+// replay + create-vs-update) reads as one linear sequence; splitting it would
+// scatter the request-handling contract across helpers. The branch path is
+// already extracted into `dispatch_branch_commit`.
+#[allow(clippy::too_many_lines)]
 pub async fn commit_table(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -1418,7 +1502,9 @@ pub async fn commit_table(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Response, ApiError> {
-    let warehouse = resolve_warehouse(&state.pool, &prefix).await?;
+    // Branch-as-catalog (K-F2): resolve the base warehouse and the catalog ref
+    // from the prefix. A branch commit goes to the branch pointer, not main.
+    let (warehouse, catalog) = super::namespaces::resolve_catalog_ref(&state.pool, &prefix).await?;
     let levels = decode_namespace_param(&raw_namespace)?;
     validate_table_name(&name)?;
 
@@ -1444,6 +1530,28 @@ pub async fn commit_table(
     // CREATE_TABLE on the namespace when the commit would create one.
     let record = table::get_by_name(&state.pool, &warehouse.id, &levels, &name).await?;
     let chain = namespace_scope_chain(&state.pool, &warehouse.id, &levels).await?;
+
+    // Commit to a branch (K-F1/K-F2) routes to the branch commit path, which
+    // advances the branch pointer via the same CAS/audit/outbox discipline and
+    // never touches main. Extracted to keep this function readable.
+    if let Some(branch) = catalog.branch() {
+        return dispatch_branch_commit(
+            &state,
+            &backend,
+            &warehouse,
+            branch,
+            record,
+            &chain,
+            &levels,
+            &name,
+            &parsed,
+            &principal,
+            key.as_deref(),
+            &fingerprint,
+        )
+        .await;
+    }
+
     if let Some(existing) = &record {
         require(
             &state.pool,
@@ -2054,6 +2162,171 @@ async fn commit_existing_table(
     )))
 }
 
+/// Dispatches a commit whose prefix carried a branch/tag (K-F1/K-F2): rejects a
+/// tag (immutable), requires the table to already exist (creating a table only
+/// on a branch is out of scope this milestone), authorizes, replays an
+/// idempotency hit, and runs the branch commit loop.
+// One call site; the args are the commit context (state, backend, warehouse,
+// branch, the resolved record + its namespace chain, the parsed request, the
+// principal, and the idempotency inputs) — a struct would only rename them.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_branch_commit(
+    state: &AppState,
+    backend: &PostgresCommitBackend,
+    warehouse: &WarehouseRecord,
+    branch: &meridian_store::branches::BranchRecord,
+    record: Option<table::TableRecord>,
+    chain: &[String],
+    levels: &[String],
+    name: &str,
+    parsed: &ParsedCommit,
+    principal: &Principal,
+    key: Option<&str>,
+    fingerprint: &str,
+) -> Result<Response, ApiError> {
+    if branch.is_tag() {
+        return Err(ApiError::foreign_read_only(format!(
+            "{:?} is a tag (an immutable ref) and cannot be committed to; \
+             commit to a branch or to main instead",
+            branch.name
+        )));
+    }
+    let Some(existing) = record else {
+        return Err(no_such_table(levels, name));
+    };
+    require(
+        &state.pool,
+        principal,
+        Privilege::Commit,
+        &SecurableScope::table(&warehouse.id, chain.to_vec(), Some(&existing.id)),
+    )
+    .await?;
+    reject_if_foreign(&existing, levels, name)?;
+    let storage = connect_storage(warehouse)?;
+    if let Some(key) = key
+        && let Some(response) = try_replay(backend, &storage, key, fingerprint).await?
+    {
+        return Ok(response);
+    }
+    let idem = key.map(|k| (k, fingerprint));
+    commit_existing_table_branch(backend, &storage, branch, &existing, parsed, idem).await
+}
+
+/// The branch commit loop (K-F1/K-F2). Structurally identical to
+/// [`commit_existing_table`]'s optimistic loop, but each attempt loads the
+/// table's pointer *through the branch overlay* (the branch's diverged
+/// metadata.json if present, else main's), stages a candidate, and CAS's the
+/// **branch** pointer via [`PostgresCommitBackend::commit_branch_table`]. main
+/// is never in the write set (branching.md §3), so a branch commit cannot move
+/// main. On the first commit for a table the branch pointer is seeded from
+/// main and the table diverges; thereafter it advances a branch-local version.
+///
+/// The circuit breaker (Pillar E) is intentionally not run on a branch commit:
+/// contracts gate the *merge* to main (the branch merge gate, K-F3), letting a
+/// branch hold in-progress/experimental state that would not yet pass main's
+/// contracts — the whole point of a dev branch.
+async fn commit_existing_table_branch(
+    backend: &PostgresCommitBackend,
+    storage: &Arc<dyn Storage>,
+    branch: &meridian_store::branches::BranchRecord,
+    record: &table::TableRecord,
+    parsed: &ParsedCommit,
+    idempotency: Option<(&str, &str)>,
+) -> Result<Response, ApiError> {
+    for _attempt in 1..=MAX_COMMIT_ATTEMPTS {
+        // Load the base the commit builds on: the branch pointer if diverged,
+        // else main (a fall-through seed for first divergence).
+        let (pointer, diverged) = backend
+            .load_branch_pointer(&branch.id, &record.id)
+            .await
+            .map_err(backend_to_api)?;
+        let base = read_table_metadata(storage.as_ref(), &pointer.metadata_location)
+            .await
+            .map_err(|e| current_metadata_unreadable(&pointer.metadata_location, &e))?;
+
+        let mut violations = Vec::new();
+        check_requirements(
+            &parsed.requirements,
+            Some(&base),
+            &record.name,
+            &mut violations,
+        );
+        if !violations.is_empty() {
+            return Err(ApiError::commit_failed(violations.join("; ")));
+        }
+
+        let mut builder = base.builder_from();
+        builder
+            .apply_all(parsed.updates.iter().cloned())
+            .map_err(|e| map_build_error(&e))?;
+        let candidate = builder
+            .build(
+                Utc::now().timestamp_millis(),
+                Some(&pointer.metadata_location),
+            )
+            .map_err(|e| map_build_error(&e))?;
+
+        // Stage under the next branch pointer version with a fresh uuid, so no
+        // attempt can overwrite a published branch file.
+        let staged_location =
+            new_metadata_location(&candidate.location, pointer.version + 1, Uuid::new_v4());
+        meridian_storage::write_table_metadata(storage.as_ref(), &staged_location, &candidate)
+            .await
+            .map_err(|e| storage_to_api(&e))?;
+
+        match backend
+            .commit_branch_table(
+                &branch.id,
+                &record.id,
+                pointer.version,
+                diverged,
+                &staged_location,
+                idempotency,
+            )
+            .await
+        {
+            Ok(receipt) if receipt.replayed => {
+                discard_staged(storage, &staged_location).await;
+                return replay_response(storage, &receipt).await;
+            }
+            Ok(receipt) => {
+                let version = receipt
+                    .tables
+                    .first()
+                    .map_or(0, |t| i64::try_from(t.version).unwrap_or(i64::MAX));
+                let body = json!({
+                    "metadata-location": staged_location,
+                    "metadata": metadata_to_value(&candidate)?,
+                });
+                return Ok(json_with_etag(
+                    StatusCode::OK,
+                    body,
+                    &table_etag(&record.table_uuid, version, false),
+                ));
+            }
+            Err(CommitBackendError::VersionConflict { .. }) => {
+                discard_staged(storage, &staged_location).await;
+            }
+            Err(CommitBackendError::StateUnknown { message }) => {
+                tracing::error!(%message, table = %record.id, branch = %branch.id,
+                    "branch commit state unknown");
+                return Err(ApiError::commit_state_unknown(
+                    "the branch commit outcome could not be determined; retry with the \
+                     same Idempotency-Key to resolve",
+                ));
+            }
+            Err(other) => {
+                discard_staged(storage, &staged_location).await;
+                return Err(backend_to_api(other));
+            }
+        }
+    }
+    Err(ApiError::commit_failed(format!(
+        "branch commit lost the compare-and-set race {MAX_COMMIT_ATTEMPTS} time(s); \
+         refresh and retry"
+    )))
+}
+
 /// Finalizes a create transaction: `assert-create` + the full update list
 /// against an empty base. The row insert (with its audit row, outbox event,
 /// and receipt) is the atomic publication point; a concurrent create makes
@@ -2146,7 +2419,7 @@ async fn commit_create_table(
 }
 
 /// Maps commit-backend failures onto the IRC error surface.
-fn backend_to_api(error: CommitBackendError) -> ApiError {
+pub(crate) fn backend_to_api(error: CommitBackendError) -> ApiError {
     match error {
         CommitBackendError::TableNotFound { table } => {
             ApiError::no_such_table(format!("table {table} does not exist"))

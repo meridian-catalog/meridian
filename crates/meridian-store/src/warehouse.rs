@@ -150,6 +150,25 @@ pub async fn get_by_name(
     .map_err(|e| map_sqlx_error("failed to load warehouse", e))
 }
 
+/// Loads a warehouse by its internal id. Used where a caller holds an id
+/// (e.g. a fileset asset's `warehouse_id`, Pillar I) rather than a name.
+pub async fn get_by_id(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    id: &str,
+) -> Result<Option<WarehouseRecord>> {
+    sqlx::query_as(
+        "SELECT id, workspace_id, name, storage_root, storage_config, created_at, updated_at
+         FROM warehouses
+         WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id.to_string())
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| map_sqlx_error("failed to load warehouse by id", e))
+}
+
 /// Deletes a warehouse by name, with its audit row and outbox event,
 /// atomically. The warehouse must be empty (no namespaces).
 ///

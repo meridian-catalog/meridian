@@ -105,9 +105,10 @@ field ids on `createView` too (see
 [docs/api-status.md](../../../docs/api-status.md#views)), and the view
 step passes end to end.
 
-## Known gap: `CREATE OR REPLACE VIEW`
+### `CREATE OR REPLACE VIEW` — provisional field ids (fixed in Meridian)
 
-Replacing an *existing* view from Spark still fails with the same error:
+Replacing an *existing* view from Spark used to fail with the same error
+`CREATE VIEW` once did:
 
 ```
 org.apache.iceberg.exceptions.BadRequestException:
@@ -115,13 +116,15 @@ Malformed request: invalid schema: field id 0 is not positive
 ```
 
 `replaceView` goes through the view commit path, whose `add-schema`
-update still validates field ids strictly — but Spark sends 0-based ids
-there as well, and view schemas have no cross-version field-id
-continuity that strict validation would protect (the Java reference
-accepts client-sent ids on replace). Initial `CREATE OR REPLACE VIEW` of
-a view that does not exist yet works (it is a create). Tracked in
-[docs/api-status.md](../../../docs/api-status.md#views); not part of the
-suite's pass criteria, so the smoke stays green while the gap is open.
+update carries the same 0-based ids Spark numbers a fresh schema from.
+View schemas have no cross-version field-id continuity that strict
+validation would protect, so Meridian now assigns fresh 1-based field ids
+server-side on the replace path too, mirroring `createView` — the same
+statement behaves identically whether or not the view already existed.
+The view-metadata builder keeps its strict validation for updates the
+server constructs itself. Initial `CREATE OR REPLACE VIEW` of a view that
+does not exist yet was always fine (it is a create). See
+[docs/api-status.md](../../../docs/api-status.md#views).
 
 ## Version pinning
 

@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::error::ApiError;
-use crate::routes::namespaces::resolve_warehouse;
 
 /// The endpoints this server implements, in the spec's endpoint-identifier
 /// syntax. Sent in every config response so clients do not assume the
@@ -105,8 +104,20 @@ pub async fn get_config(
     let mut overrides = BTreeMap::new();
 
     if let Some(name) = query.warehouse.as_deref().filter(|w| !w.is_empty()) {
-        let wh = resolve_warehouse(&state.pool, name).await?;
-        overrides.insert("prefix".to_owned(), wh.name);
+        // Branch-as-catalog (K-F2): a `warehouse@branch` warehouse resolves its
+        // base warehouse and (when present) its branch/tag, then echoes back the
+        // FULL prefix so the client keeps addressing the branch on every
+        // subsequent call. This is what lets a plain PyIceberg/Spark/Trino
+        // client bootstrap against a branch.
+        let (wh, catalog) = super::namespaces::resolve_catalog_ref(&state.pool, name).await?;
+        // Echo the full prefix for a branch/tag so the client keeps addressing
+        // it; the bare warehouse name otherwise.
+        let prefix = if catalog.branch().is_some() {
+            name.to_owned()
+        } else {
+            wh.name
+        };
+        overrides.insert("prefix".to_owned(), prefix);
     }
 
     let mut endpoints: Vec<String> = IMPLEMENTED_ENDPOINTS

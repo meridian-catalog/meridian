@@ -973,6 +973,82 @@ export interface ProductStatusResponse {
   table_statuses: Array<{ member_ref: string; resolved: Record<string, unknown> }>;
 }
 
+// ---- sharing (Pillar J, J-F1) -----------------------------------------------
+
+export interface Share {
+  id: string;
+  name: string;
+  recipient: string;
+  created_by: string;
+  revoked: boolean;
+  revoked_at?: string | null;
+  has_terms: boolean;
+  terms_accepted: boolean;
+  terms_accepted_at?: string | null;
+  created_at: string;
+  // Present only on the create response (the token is shown exactly once).
+  token?: string;
+}
+
+export interface ShareGrant {
+  id: string;
+  securable_kind: "table" | "view" | "data_product";
+  securable_ref: string;
+  row_filter?: string | null;
+  column_mask?: string[] | null;
+  created_at: string;
+}
+
+export interface ShareDetail extends Share {
+  grants: ShareGrant[];
+}
+
+export interface ListSharesResponse {
+  shares: Share[];
+}
+
+export interface CreateShareRequest {
+  name: string;
+  recipient: string;
+  terms?: string;
+}
+
+export interface AddShareGrantRequest {
+  securable_kind: "table" | "view" | "data_product";
+  securable_ref: string;
+  row_filter?: string;
+  column_mask?: string[];
+}
+
+// ---- internal marketplace (Pillar J, J-F2) ----------------------------------
+
+export interface AccessRequest {
+  id: string;
+  principal: string;
+  securable_type: "warehouse" | "namespace" | "table" | "view";
+  securable_id: string;
+  privilege: string;
+  purpose: string;
+  ttl_seconds?: number | null;
+  state: "pending" | "approved" | "denied" | "expired";
+  decided_by?: string | null;
+  reason?: string | null;
+  decided_at?: string | null;
+  created_at: string;
+}
+
+export interface ListAccessRequestsResponse {
+  requests: AccessRequest[];
+}
+
+export interface RequestAccessRequest {
+  securable_type: "warehouse" | "namespace" | "table" | "view";
+  securable_id: string;
+  privilege?: string;
+  purpose: string;
+  ttl_seconds?: number;
+}
+
 export interface TranspileDiagnostic {
   severity: string;
   code: string;

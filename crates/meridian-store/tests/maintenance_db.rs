@@ -17,24 +17,55 @@ use meridian_store::maintenance::{self, JobState, JobType, PolicySpec, SavingsIn
 use meridian_store::table::{self, NewTable};
 use meridian_store::{namespace, tenancy, warehouse};
 use serde_json::json;
-use sqlx::PgPool;
-use tokio::sync::{Mutex, MutexGuard, OnceCell};
+use sqlx::{Connection, PgConnection, PgPool};
 use ulid::Ulid;
 
 /// `claim_next` scans the job queue *globally* (a shared worker pool, by
-/// design), so tests that enqueue-and-claim must not run concurrently with
-/// each other or a foreign workspace's still-queued job could be claimed
-/// mid-test. This process-wide async mutex serializes exactly those tests;
-/// no other test binary calls `claim_next`, so DB-level isolation is complete
-/// once this binary's queue tests are serialized.
-static QUEUE_SERIAL: OnceCell<Mutex<()>> = OnceCell::const_new();
+/// design), and the server crate's `maintenance_worker` tests reset that same
+/// queue (`DELETE FROM maintenance_jobs`) at the start of each test. A single
+/// Postgres table is therefore shared across *two* test binaries running
+/// against one database, so a foreign workspace's still-queued job could be
+/// claimed mid-test, or a sibling's reset could delete this test's rows out
+/// from under it. An in-process mutex cannot see the other binary; a Postgres
+/// advisory lock can. Every queue test in either binary takes this lock (on a
+/// dedicated connection, held for the test's lifetime) so the shared queue is
+/// serialized process-to-process, exactly like the outbox-relay tests.
+///
+/// Advisory lock key shared by all maintenance-queue tests across test
+/// binaries (ASCII "MAINTQUE" packed into an i64; must match the key in
+/// `meridian-server/tests/maintenance_worker.rs`).
+const QUEUE_TEST_LOCK_KEY: i64 = 0x4D41_494E_5451_5545;
 
-async fn queue_lock() -> MutexGuard<'static, ()> {
-    QUEUE_SERIAL
-        .get_or_init(|| async { Mutex::new(()) })
+/// Takes the cross-binary maintenance-queue test lock on a dedicated
+/// (non-pooled) connection; the lock releases when the returned connection
+/// drops at end of test. Serializes queue tests within this binary and against
+/// the server crate's worker tests, so each sees a private queue.
+async fn queue_test_lock() -> PgConnection {
+    // `fixture()` has already confirmed DATABASE_URL is set before any caller
+    // reaches here.
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL set");
+    let mut conn = PgConnection::connect(&url)
         .await
-        .lock()
+        .expect("connect for advisory lock");
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(QUEUE_TEST_LOCK_KEY)
+        .execute(&mut conn)
         .await
+        .expect("take maintenance queue test lock");
+    conn
+}
+
+/// Clears the shared maintenance job queue so each queue test claims and
+/// asserts on only its own jobs. Safe because [`queue_test_lock`] guarantees
+/// no sibling queue test — in this binary or the worker binary — runs
+/// concurrently. The savings ledger is intentionally left alone: its `job_id`
+/// is not a FK to this table (a receipt outlives its job), and each test's
+/// rollup is already scoped to its own fresh workspace.
+async fn reset_queue(pool: &PgPool) {
+    sqlx::query("DELETE FROM maintenance_jobs")
+        .execute(pool)
+        .await
+        .expect("reset maintenance job queue");
 }
 
 struct Fixture {
@@ -281,7 +312,8 @@ async fn duplicate_policy_at_a_scope_conflicts() {
 #[tokio::test]
 async fn job_lifecycle_queue_claim_complete() {
     let Some(fx) = fixture().await else { return };
-    let _serial = queue_lock().await;
+    let _lock = queue_test_lock().await;
+    reset_queue(&fx.pool).await;
 
     let job = maintenance::enqueue_job(
         &fx.pool,
@@ -334,7 +366,8 @@ async fn job_lifecycle_queue_claim_complete() {
 #[tokio::test]
 async fn cancel_queued_and_running_jobs() {
     let Some(fx) = fixture().await else { return };
-    let _serial = queue_lock().await;
+    let _lock = queue_test_lock().await;
+    reset_queue(&fx.pool).await;
 
     // Cancel a queued job.
     let queued = maintenance::enqueue_job(
@@ -363,7 +396,8 @@ async fn cancel_queued_and_running_jobs() {
 #[tokio::test]
 async fn skip_locked_claim_gives_each_job_to_one_worker() {
     let Some(fx) = fixture().await else { return };
-    let _serial = queue_lock().await;
+    let _lock = queue_test_lock().await;
+    reset_queue(&fx.pool).await;
     const N: usize = 12;
     const ROUNDS: usize = 6;
     let pool = Arc::new(fx.pool.clone());
@@ -411,8 +445,9 @@ async fn skip_locked_claim_gives_each_job_to_one_worker() {
         }
     }
 
-    // Invariant 1: our jobs are never double-claimed. (Other test binaries
-    // share the global worker pool, so restrict to ids we enqueued.)
+    // Invariant 1: our jobs are never double-claimed. `claim_next` scans the
+    // queue globally, so restrict to ids we enqueued (defensive even under the
+    // queue lock, which already keeps the queue private to this test).
     let mut our_claims: Vec<&String> = claimed.iter().filter(|id| ids.contains(*id)).collect();
     our_claims.sort();
     let deduped: std::collections::BTreeSet<_> = our_claims.iter().collect();
@@ -423,7 +458,7 @@ async fn skip_locked_claim_gives_each_job_to_one_worker() {
     );
 
     // Invariant 2: none of our jobs is still queued (each was claimed by
-    // exactly one worker — ours or, harmlessly, a concurrent test's).
+    // exactly one worker).
     for id in &ids {
         let job = maintenance::get_job(&fx.pool, fx.workspace, id)
             .await
@@ -440,7 +475,8 @@ async fn skip_locked_claim_gives_each_job_to_one_worker() {
 #[tokio::test]
 async fn savings_ledger_rollup_sums_by_month() {
     let Some(fx) = fixture().await else { return };
-    let _serial = queue_lock().await;
+    let _lock = queue_test_lock().await;
+    reset_queue(&fx.pool).await;
 
     // Two completed jobs, two ledger rows in the same month.
     for (before, after, files_before, files_after) in
@@ -510,20 +546,14 @@ async fn savings_ledger_rollup_sums_by_month() {
     let rollup = maintenance::monthly_rollup(&fx.pool, fx.workspace, 24)
         .await
         .expect("rollup");
-    // The workspace is shared across test binaries, so assert our two jobs'
-    // savings are *included* in the current month's totals rather than equal.
+    // `monthly_rollup` is scoped to this workspace, and each test gets its own
+    // fresh workspace, so the current month's totals are exactly our two jobs'
+    // savings — bytes (600 + 500) = 1100, files (45 + 16) = 61.
     let current_month = rollup
         .iter()
         .max_by_key(|r| r.period)
         .expect("at least one period");
-    // Our contribution: bytes (600 + 500) = 1100, files (45 + 16) = 61.
-    assert!(
-        current_month.bytes_saved >= 1_100,
-        "rollup includes our bytes_saved"
-    );
-    assert!(
-        current_month.files_removed >= 61,
-        "rollup includes our files_removed"
-    );
-    assert!(current_month.job_count >= 2);
+    assert_eq!(current_month.job_count, 2);
+    assert_eq!(current_month.bytes_saved, 1_100, "summed bytes_saved");
+    assert_eq!(current_month.files_removed, 61, "summed files_removed");
 }

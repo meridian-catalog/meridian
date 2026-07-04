@@ -335,11 +335,13 @@ pub async fn delete_role_binding(
 /// server-side).
 #[derive(Debug, Deserialize)]
 pub struct SecurableSelector {
-    /// `warehouse` | `namespace` | `table` | `view`.
+    /// `warehouse` | `namespace` | `table` | `view` | `asset`.
     #[serde(rename = "type")]
     pub securable_type: String,
-    /// Warehouse name (always required).
-    pub warehouse: String,
+    /// Warehouse name (required for every type except `asset`, which is
+    /// workspace-scoped and addressed by id).
+    #[serde(default)]
+    pub warehouse: Option<String>,
     /// Namespace levels (required for `namespace`, `table`, and `view`).
     #[serde(default)]
     pub namespace: Option<Vec<String>>,
@@ -349,6 +351,9 @@ pub struct SecurableSelector {
     /// View name (required for `view`).
     #[serde(default)]
     pub view: Option<String>,
+    /// Generic-asset id (required for `asset`, Pillar I).
+    #[serde(default)]
+    pub asset: Option<String>,
 }
 
 /// Request body for `POST /api/v2/grants`. Exactly one of `role` /
@@ -417,16 +422,48 @@ async fn resolve_securable(
 ) -> Result<(SecurableType, String), ApiError> {
     let securable_type = SecurableType::parse(&selector.securable_type).ok_or_else(|| {
         ApiError::bad_request(format!(
-            "invalid securable type {:?}: expected warehouse, namespace, table, or view",
+            "invalid securable type {:?}: expected warehouse, namespace, table, view, or asset",
             selector.securable_type
         ))
     })?;
-    let wh = warehouse::get_by_name(pool, tenancy::default_workspace_id(), &selector.warehouse)
+
+    // An asset is workspace-scoped (Pillar I): addressed by its id, with no
+    // warehouse/namespace context. Resolve it before the warehouse lookup that
+    // every other type needs.
+    if securable_type == SecurableType::Asset {
+        let asset_id = selector
+            .asset
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                ApiError::bad_request(
+                    "securable.asset (an asset id) is required for type \"asset\"",
+                )
+            })?;
+        let asset =
+            meridian_store::assets::get_asset(pool, tenancy::default_workspace_id(), asset_id)
+                .await?
+                .ok_or_else(|| {
+                    ApiError::new(
+                        StatusCode::NOT_FOUND,
+                        "NotFoundException",
+                        format!("no asset {asset_id}"),
+                    )
+                })?;
+        return Ok((securable_type, asset.id));
+    }
+
+    let warehouse_name = selector.warehouse.as_deref().ok_or_else(|| {
+        ApiError::bad_request("securable.warehouse is required for this securable type")
+    })?;
+    let wh = warehouse::get_by_name(pool, tenancy::default_workspace_id(), warehouse_name)
         .await?
-        .ok_or_else(|| ApiError::no_such_warehouse(&selector.warehouse))?;
+        .ok_or_else(|| ApiError::no_such_warehouse(warehouse_name))?;
 
     match securable_type {
         SecurableType::Warehouse => Ok((securable_type, wh.id)),
+        // Handled above; unreachable here.
+        SecurableType::Asset => unreachable!("asset resolved before warehouse lookup"),
         SecurableType::Namespace | SecurableType::Table | SecurableType::View => {
             let levels = selector
                 .namespace

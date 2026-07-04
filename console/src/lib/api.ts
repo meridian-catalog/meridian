@@ -61,6 +61,15 @@ import type {
   ListProductsResponse,
   CreateProductRequest,
   ProductStatusResponse,
+  Share,
+  ShareGrant,
+  ShareDetail,
+  ListSharesResponse,
+  CreateShareRequest,
+  AddShareGrantRequest,
+  AccessRequest,
+  ListAccessRequestsResponse,
+  RequestAccessRequest,
   TranspileResponse,
   WorkbenchQueryResponse,
   WorkbenchHistoryResponse,
@@ -531,6 +540,50 @@ export const api = {
     namespace: string;
     table: string;
   }) => request<SnippetResponse>("/api/v2/workbench/snippet", { method: "POST", body }),
+
+  // ---- sharing (Pillar J, J-F1) ----------------------------------------
+  listShares: () => request<ListSharesResponse>("/api/v2/shares"),
+  getShare: (id: string) =>
+    request<ShareDetail>(`/api/v2/shares/${encodeURIComponent(id)}`),
+  createShare: (body: CreateShareRequest) =>
+    request<Share>("/api/v2/shares", { method: "POST", body }),
+  addShareGrant: (id: string, body: AddShareGrantRequest) =>
+    request<ShareGrant>(`/api/v2/shares/${encodeURIComponent(id)}/grants`, {
+      method: "POST",
+      body,
+    }),
+  removeShareGrant: (grantId: string) =>
+    request<void>(`/api/v2/shares/grants/${encodeURIComponent(grantId)}`, {
+      method: "DELETE",
+      expectNoContent: true,
+    }),
+  revokeShare: (id: string) =>
+    request<Share>(`/api/v2/shares/${encodeURIComponent(id)}/revoke`, {
+      method: "POST",
+    }),
+  deleteShare: (id: string) =>
+    request<void>(`/api/v2/shares/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      expectNoContent: true,
+    }),
+
+  // ---- internal marketplace (Pillar J, J-F2) ---------------------------
+  marketplaceProducts: () =>
+    request<ListProductsResponse>("/api/v2/marketplace/products"),
+  requestAccess: (body: RequestAccessRequest) =>
+    request<AccessRequest>("/api/v2/marketplace/requests", {
+      method: "POST",
+      body,
+    }),
+  listAccessRequests: (state?: string) =>
+    request<ListAccessRequestsResponse>(
+      `/api/v2/marketplace/requests${state ? `?state=${encodeURIComponent(state)}` : ""}`,
+    ),
+  decideAccessRequest: (id: string, approve: boolean, reason?: string) =>
+    request<AccessRequest>(
+      `/api/v2/marketplace/requests/${encodeURIComponent(id)}/decide`,
+      { method: "POST", body: { approve, reason } },
+    ),
 };
 
 export type Api = typeof api;

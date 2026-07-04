@@ -1,6 +1,6 @@
 //! Zero-scan data-quality monitors (Pillar E / E-F1) and their append-only
 //! result series. This is the *detection* half of the observability pillar: a
-//! monitor is evaluated from the commit stream + the [`table_snapshots`]
+//! monitor is evaluated from the commit stream + the `table_snapshots`
 //! write-through index + `metrics_reports` — **never** by scanning data files —
 //! and a breach opens an incident (see [`crate::incidents`]).
 //!

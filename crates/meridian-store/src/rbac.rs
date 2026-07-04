@@ -111,6 +111,10 @@ pub enum SecurableType {
     Table,
     /// A single view.
     View,
+    /// A single generic AI asset — a fileset, model, or vector dataset
+    /// (Pillar I). A leaf securable, workspace-scoped (no namespace
+    /// hierarchy): a grant attaches directly to the asset row.
+    Asset,
 }
 
 impl Privilege {
@@ -178,7 +182,10 @@ impl Privilege {
         let rank = |t: SecurableType| match t {
             SecurableType::Warehouse => 0,
             SecurableType::Namespace => 1,
-            SecurableType::Table | SecurableType::View => 2,
+            // Assets are standalone leaves (Pillar I): no namespace hierarchy,
+            // so only the leaf-native privileges (READ/WRITE/COMMIT/DROP) reach
+            // them, exactly as they reach tables and views.
+            SecurableType::Table | SecurableType::View | SecurableType::Asset => 2,
         };
         rank(securable) <= rank(self.native_securable())
     }
@@ -205,6 +212,7 @@ impl SecurableType {
             Self::Namespace => "namespace",
             Self::Table => "table",
             Self::View => "view",
+            Self::Asset => "asset",
         }
     }
 
@@ -216,6 +224,7 @@ impl SecurableType {
             "namespace" => Some(Self::Namespace),
             "table" => Some(Self::Table),
             "view" => Some(Self::View),
+            "asset" => Some(Self::Asset),
             _ => None,
         }
     }
@@ -243,6 +252,9 @@ pub struct SecurableScope {
     pub table_id: Option<String>,
     /// The view itself.
     pub view_id: Option<String>,
+    /// The generic AI asset itself (Pillar I). Standalone leaf: no
+    /// warehouse/namespace inheritance applies to it.
+    pub asset_id: Option<String>,
 }
 
 impl SecurableScope {
@@ -276,6 +288,7 @@ impl SecurableScope {
             namespace_ids,
             table_id: table_id.map(str::to_owned),
             view_id: None,
+            asset_id: None,
         }
     }
 
@@ -290,6 +303,20 @@ impl SecurableScope {
             namespace_ids,
             table_id: None,
             view_id: view_id.map(str::to_owned),
+            asset_id: None,
+        }
+    }
+
+    /// Scope for an asset-level check (Pillar I). An asset is a standalone
+    /// leaf: only a grant on the asset itself (or the admin role) decides,
+    /// with no warehouse/namespace inheritance. `asset_id` is optional so an
+    /// operation on an asset that may not exist can still be denied without
+    /// leaking existence.
+    #[must_use]
+    pub fn asset(asset_id: Option<&str>) -> Self {
+        Self {
+            asset_id: asset_id.map(str::to_owned),
+            ..Self::default()
         }
     }
 }
@@ -356,7 +383,8 @@ const AUTHORIZE_SQL: &str = "\
            AND ((g.securable_type = 'warehouse' AND g.securable_id = $5)
              OR (g.securable_type = 'namespace' AND g.securable_id = ANY($6))
              OR (g.securable_type = 'table' AND g.securable_id = $7)
-             OR (g.securable_type = 'view' AND g.securable_id = $8))
+             OR (g.securable_type = 'view' AND g.securable_id = $8)
+             OR (g.securable_type = 'asset' AND g.securable_id = $9))
     )";
 
 /// Decides whether `principal` may exercise `privilege` on the securable
@@ -388,6 +416,7 @@ pub async fn authorize(
         .bind(&scope.namespace_ids)
         .bind(scope.table_id.as_deref())
         .bind(scope.view_id.as_deref())
+        .bind(scope.asset_id.as_deref())
         .fetch_one(pool)
         .await
         .map_err(|e| AuthzError::Store(map_sqlx_error("failed to evaluate authorization", e)))?;

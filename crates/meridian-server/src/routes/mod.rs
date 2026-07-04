@@ -8,7 +8,9 @@
 //! identical to the pre-authentication behavior.
 
 pub mod agents;
+pub mod assets;
 pub mod audit;
+pub mod branches;
 pub mod events;
 pub mod federation;
 pub mod governance;
@@ -24,6 +26,7 @@ pub mod principals;
 pub mod quality;
 pub mod search;
 pub mod semantics;
+pub mod shares;
 pub mod signing;
 pub mod tables;
 pub mod vending;

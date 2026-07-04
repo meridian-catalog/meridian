@@ -17,9 +17,9 @@
 //!   the view spec explicitly reuses.
 //! - **Tables and views share one name space per namespace**: the spec's
 //!   `createView`/`renameView` (and `createTable`/`renameTable`) 409 when
-//!   "the identifier already exists as a table or view". The views side is
-//!   enforced here and in the store; enforcement status for the tables side
-//!   is recorded in `docs/api-status.md`.
+//!   "the identifier already exists as a table or view". Both directions are
+//!   enforced: the views side here (and in [`meridian_store::view`]), the
+//!   tables side in [`super::tables`] and [`meridian_store::table`].
 //! - **No `ETag` on view responses**: the spec defines the `ETag` header and
 //!   `If-None-Match` handling for table load responses only
 //!   (`LoadViewResponse` carries no `etag` header), so views deliberately
@@ -755,6 +755,37 @@ fn parse_view_commit_request(value: &Value) -> Result<ParsedViewCommit, ApiError
     })
 }
 
+/// Reassigns fresh, 1-based field ids to every `add-schema` update's schema,
+/// treating replace-request field ids as provisional exactly as `createView`
+/// does (see [`build_new_view_metadata`]).
+///
+/// Spark 3.5's `CREATE OR REPLACE VIEW` numbers the replacement view's output
+/// schema from 0, identically to its `CREATE VIEW`; the strict view-metadata
+/// builder would otherwise reject the commit with `field id 0 is not positive`.
+/// View schemas carry no cross-version field-id continuity (no data files
+/// reference them), so reassignment is safe and keeps create and replace
+/// consistent — the same statement yields the same server-assigned ids whether
+/// or not the view already existed. The deprecated `last-column-id` is
+/// provisional too, and dropped. Genuinely broken schemas (duplicate sibling
+/// names, unresolvable `identifier-field-ids`) still fail as 400s. The builder
+/// keeps its strict validation for updates the server constructs itself.
+fn assign_fresh_view_schema_ids(updates: &[ViewUpdate]) -> Result<Vec<ViewUpdate>, ApiError> {
+    updates
+        .iter()
+        .map(|update| match update {
+            ViewUpdate::AddSchema { schema, .. } => {
+                let fresh = meridian_iceberg::spec::assign_fresh_ids(schema, None, None)
+                    .map_err(|e| ApiError::bad_request(e.to_string()))?;
+                Ok(ViewUpdate::AddSchema {
+                    schema: fresh.schema,
+                    last_column_id: None,
+                })
+            }
+            other => Ok(other.clone()),
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // GET /{prefix}/namespaces/{namespace}/views — list
 // ---------------------------------------------------------------------------
@@ -1124,7 +1155,7 @@ pub async fn replace_view(
     let levels = decode_namespace_param(&raw_namespace)?;
     validate_view_name(&name)?;
 
-    let parsed = parse_view_commit_request(&body)?;
+    let mut parsed = parse_view_commit_request(&body)?;
     if let Some(identifier) = &parsed.identifier
         && (identifier.namespace != levels || identifier.name != name)
     {
@@ -1146,6 +1177,12 @@ pub async fn replace_view(
         Privilege::Commit,
     )
     .await?;
+
+    // Request field ids are provisional on replace just as on create: Spark
+    // 3.5's `CREATE OR REPLACE VIEW` numbers the output schema from 0. Assign
+    // fresh server-side ids once (identical across rebase-retry attempts),
+    // mirroring `createView`.
+    parsed.updates = assign_fresh_view_schema_ids(&parsed.updates)?;
 
     let storage = connect_storage(&warehouse)?;
 

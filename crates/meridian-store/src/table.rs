@@ -7,6 +7,12 @@
 //! listing, rename, and drop; every mutation writes its audit row and outbox
 //! event on the same transaction as the state change (invariant I6: no code
 //! path mutates a pointer without its audit row).
+//!
+//! Tables and views share one name space per namespace (the REST spec 409s
+//! a create/rename whose identifier "already exists as a table or view").
+//! The tables side of that invariant is enforced here: create and rename
+//! check the `views` table inside their transactions, the mirror of
+//! [`crate::view`]'s check against the `tables` table.
 
 use std::collections::BTreeMap;
 
@@ -217,6 +223,20 @@ pub async fn list(
     .map_err(|e| map_sqlx_error("failed to list tables", e))
 }
 
+/// True when a *view* of this name exists in the namespace (tables and
+/// views share one name space; used by create/rename collision checks).
+async fn view_name_taken<'e, E>(executor: E, namespace_id: &str, name: &str) -> Result<bool>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM views WHERE namespace_id = $1 AND name = $2)")
+        .bind(namespace_id)
+        .bind(name)
+        .fetch_one(executor)
+        .await
+        .map_err(|e| map_sqlx_error("failed to check view name collision", e))
+}
+
 /// Inserts a table row, with its audit row and outbox event, atomically.
 ///
 /// The initial `metadata.json` must already be durably written at
@@ -228,8 +248,9 @@ pub async fn list(
 /// When `receipt` is given (the commit-endpoint create transaction carries
 /// an idempotency key), it is recorded in the same transaction (I5).
 ///
-/// Returns [`MeridianError::Conflict`] when the table already exists and
-/// [`MeridianError::NotFound`] when the namespace vanished concurrently.
+/// Returns [`MeridianError::Conflict`] when the name is already taken by a
+/// table *or a view* in the namespace (shared name space per the REST spec)
+/// and [`MeridianError::NotFound`] when the namespace vanished concurrently.
 pub async fn create(
     pool: &PgPool,
     table: NewTable<'_>,
@@ -240,6 +261,18 @@ pub async fn create(
         .begin()
         .await
         .map_err(|e| map_sqlx_error("failed to begin table create", e))?;
+
+    // Tables and views share one name space. The check runs inside the
+    // insert transaction; a racing view create can still slip between this
+    // check and our commit (no cross-table constraint exists), which is
+    // documented in docs/api-status.md.
+    if view_name_taken(&mut *tx, table.namespace_id, table.name).await? {
+        return Err(MeridianError::Conflict(format!(
+            "a view named {:?} already exists in this namespace \
+             (tables and views share a namespace)",
+            table.name
+        )));
+    }
 
     let id = Ulid::new().to_string();
     let record: TableRecord = sqlx::query_as(&format!(
@@ -375,7 +408,7 @@ pub(crate) async fn record_receipt(
 ///
 /// Returns [`MeridianError::NotFound`] when the source table or destination
 /// namespace does not exist, and [`MeridianError::Conflict`] when the
-/// destination identifier is already taken.
+/// destination identifier is already taken by a table *or a view*.
 #[allow(clippy::too_many_arguments)] // source/destination pairs, not a config bag
 pub async fn rename(
     pool: &PgPool,
@@ -438,6 +471,14 @@ pub async fn rename(
             }
         }
     };
+
+    // Shared name space: the destination must not be a view either.
+    if view_name_taken(&mut *tx, &destination_namespace_id, destination_name).await? {
+        return Err(MeridianError::Conflict(format!(
+            "a view named {destination_name:?} already exists in the destination \
+             namespace (tables and views share a namespace)"
+        )));
+    }
 
     sqlx::query("UPDATE tables SET namespace_id = $1, name = $2, updated_at = now() WHERE id = $3")
         .bind(&destination_namespace_id)

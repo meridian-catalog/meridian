@@ -12,6 +12,90 @@ releases begin, the project will adhere to
 
 ### Added
 
+- **Branching & Data CI/CD — catalog branching every engine can consume**
+  (Pillar K, K-F1/K-F2/K-F3). A **catalog branch** is a named, zero-copy overlay
+  of the per-table pointer map: it shares main's metadata until a table diverges,
+  at which point a `branch_table_pointers` row carries the branch's own pointer,
+  advanced by the **same CAS/outbox/audit discipline main uses** — the commit
+  invariants (no lost updates, crash-safe, idempotent, audit-durable) are
+  preserved, not weakened (there is exactly one function per pointer kind that
+  moves it). The headline is **branch-as-catalog** (K-F2): any branch is
+  mountable as its own IRC catalog under the prefix `warehouse@branch` — the
+  prefix resolver splits on the last `@`, so `loadTable` on `warehouse@dev`
+  returns the branch pointer (falling through to main for undiverged tables) and
+  a commit on `warehouse@dev` writes the branch pointer and **never moves main**.
+  Every IRC engine (Spark, Trino, PyIceberg, Snowflake-CLD, DuckDB) reads and
+  writes a branch with **no branching API** — it just points at a different
+  catalog name. **Diff** reports schema + snapshot + row-count deltas vs main
+  (unknown row counts reported as `unknown`, never fabricated). **Merge** (K-F1)
+  fast-forwards main table-by-table **through the commit path**, with
+  table-level **conflict detection** (both-sides changes refuse the whole merge,
+  fail-closed) and a **merge gate** (K-F3) that evaluates Pillar-E contracts on
+  the branch head and refuses a merge that would violate a block-mode contract
+  (reusing the circuit breaker's contract engine). **Tags** are immutable release
+  points; a commit against a `warehouse@tag` prefix is refused. **Ephemeral PR
+  branches** carry an expiry and are swept. Management API `/api/v2/branches` +
+  `/api/v2/tags`; CLI `meridian branch create|list|diff|gate|merge|delete|sweep`
+  and `meridian branch tag` (`meridian branch gate` exits non-zero on failure,
+  for dbt/SQLMesh CI). Migration `0025_branching` (`catalog_branches`,
+  `branch_namespaces`, `branch_table_pointers`, `catalog_tags`). Honest scope:
+  conflict detection is table-level (file-level overlap is future work); branch
+  snapshots are not in the search/health index until merged; the circuit breaker
+  gates the merge, not branch commits; creating a table only-on-a-branch is out
+  of scope this milestone. Full design: `docs/design/branching.md`.
+
+- **Sharing & the data-products exchange — the neutral Delta-Sharing
+  alternative** (Pillar J, J-F1/J-F2). A **share** is a scoped, read-only
+  projection of catalog assets to an external recipient org, served over a
+  **per-share Iceberg REST endpoint** (`/share/{token}/v1/...`) that works with
+  *any* IRC-capable engine on the recipient side. It is built from primitives the
+  catalog already has: **vended read-only credentials** (`meridian-vending`), an
+  optional **row filter / column mask** per grant, and the **audit log**.
+  `shares` + `share_grants` (migration `0024_sharing`): a share carries a
+  recipient identifier, an opaque 256-bit `token` (the recipient's bearer secret
+  and catalog prefix, returned exactly once, never in reads or audit), optional
+  terms-of-use with an acceptance gate, and a revocation flag. The recipient
+  endpoint is **token-authenticated** (exempt from the OIDC middleware), serves
+  **only** the granted assets, drops **masked columns** from the served schema,
+  answers every write verb with **403**, and **audits every recipient access**.
+  **Revocation is instant in effect** — the recipient only ever holds
+  short-lived vended credentials. Honest scope: **column masking is prevented**
+  at the catalog layer, but **row filtering over the neutral IRC endpoint is
+  surfaced (advisory), not prevented** — a vended-credential engine reads Parquet
+  directly, so full row-level prevention needs the query-mediated path. The
+  **internal marketplace** (J-F2): `GET /api/v2/marketplace/products` is the
+  certified-data-product gallery (Pillar G, certified-first) with a
+  request-access flow that creates and decides Pillar-D `access_requests`.
+  Management API `/api/v2/shares` + `/api/v2/marketplace`; CLI `meridian share`
+  and `meridian marketplace`; console **Sharing** page. **Out of scope
+  (explicit):** external/public marketplace and clean-room compute. Full design:
+  `docs/design/sharing.md`.
+
+- **AI Asset Governance — the catalog governs the AI supply chain** (Pillar I,
+  I-F1..I-F4). One extensible **generic-asset** model (`/api/v2/assets`): a
+  fileset, model, or vector dataset is one row with a `kind` and kind-specific
+  `metadata`, a first-class RBAC **grant securable** (`asset`, addressed by id —
+  admitted into the grants CHECK exactly as views were), and full-text
+  searchable. A **fileset** vends scoped, short-lived storage credentials
+  **bound to its prefix** (`POST /api/v2/assets/{id}/credentials`), reusing the
+  identical table-vend mechanics and RBAC-gated on the asset — every vend
+  audited. **Training-run pinning** (`POST /api/v2/training-runs`, I-F2) binds a
+  `(model, version)` to the **exact table snapshots** that trained it as an
+  **immutable, append-only** provenance record — the pinned snapshot ids are
+  stored exactly, so Iceberg time-travel reproduces the inputs. **Provenance
+  reporting** (I-F3) assembles the per-model **data → run → model** lineage, the
+  **license/consent tags that propagated** from the input sources, auto-drafted
+  **dataset cards**, and an **EU AI Act GPAI training-content summary** generated
+  from the pinned inputs. **Deletion campaigns** (I-F4) produce GDPR "right to be
+  forgotten" evidence: a campaign records the affected snapshots and **freezes
+  which model versions saw the deleted data**, tracks per-snapshot expiry status,
+  and closes when every affected snapshot is physically expired (the maintenance
+  `ExpireSnapshots` job is the tie-in). CLI: `meridian
+  asset`/`training-run`/`provenance`/`deletion`. Persistence: migration
+  `0023_ai_assets`. Honest scope: the "model → agents using it" lineage leg is
+  not modelled yet (returned empty, never fabricated); the AI Act summary is a
+  catalog-derived draft for a compliance officer, not a legal opinion.
+
 - **Governed agent queries + the SQL workbench — the built-in executor, wired**
   (Pillar H `run_sql` H-F3, Pillar L workbench L-F1/L-F3). The MCP agent
   gateway's query tools now **run** on the built-in `DataFusion` small-scan
@@ -621,10 +705,19 @@ releases begin, the project will adhere to
   Meridian rejected it with the same `field id 0 is not positive` error
   the Flink smoke hit on tables. View create requests now get fresh
   1-based field ids server-side, mirroring `createTable`. Found by the
-  [Spark conformance smoke](conformance/engines/spark/README.md). Known
-  remaining gap: `replaceView` still validates ids strictly, so Spark's
-  `CREATE OR REPLACE VIEW` on an existing view fails; documented in
-  [docs/api-status.md](docs/api-status.md#views).
+  [Spark conformance smoke](conformance/engines/spark/README.md).
+- **`replaceView` treats `add-schema` field ids as provisional too.**
+  Spark 3.5's `CREATE OR REPLACE VIEW` numbers the replacement schema from
+  0, exactly like `CREATE VIEW`, so replacing an *existing* view failed
+  with the same `field id 0 is not positive` error the create path used to
+  hit. The replace commit path now assigns fresh 1-based field ids
+  server-side (remapping `identifier-field-ids`) before the updates reach
+  the view-metadata builder, mirroring `createView` — the same statement
+  now behaves identically whether or not the view already existed. View
+  schemas have no cross-version field-id continuity to protect, so the
+  reassignment is safe; the builder keeps its strict field-id validation
+  for updates the server constructs itself. Found by the [Spark
+  conformance smoke](conformance/engines/spark/README.md).
 
 ### Security
 

@@ -662,7 +662,7 @@ pub struct SprawlSummary {
     /// Per-source asset counts.
     pub sources: Vec<SourceCount>,
     /// Storage locations registered in more than one source (capped at
-    /// [`MAX_DUPLICATES`] entries; see `duplicate_count` for the true total).
+    /// `MAX_DUPLICATES` entries; see `duplicate_count` for the true total).
     pub duplicates: Vec<DuplicateLocation>,
     /// Total number of duplicated locations, whether or not they all fit in
     /// `duplicates`. Lets callers report "showing N of M".

@@ -39,15 +39,78 @@ const DEFAULT_PAGE_SIZE: i64 = 100;
 /// Hard upper bound on a single page.
 const MAX_PAGE_SIZE: i64 = 1000;
 
-/// Resolves an IRC `{prefix}` (a warehouse name) to its warehouse, or 404
+/// Resolves an IRC `{prefix}` to its **base warehouse**, or 404
 /// `NoSuchWarehouseException`.
+///
+/// A `warehouse@branch` prefix (Pillar K, K-F2) resolves to its base warehouse
+/// here — namespaces and table *rows* are shared across branches (only the
+/// per-table metadata *pointer* diverges), so namespace resolution, table
+/// lookup, and management endpoints all operate on the base warehouse. The
+/// branch-scoped pointer is layered on top by `load_table`/`commit_table`,
+/// which split the prefix explicitly via [`resolve_catalog_ref`]. A plain
+/// warehouse name (no `@`) resolves to itself unchanged.
 pub(crate) async fn resolve_warehouse(
     pool: &PgPool,
     prefix: &str,
 ) -> Result<WarehouseRecord, ApiError> {
-    warehouse::get_by_name(pool, tenancy::default_workspace_id(), prefix)
+    let (base, _branch) = split_prefix(prefix);
+    warehouse::get_by_name(pool, tenancy::default_workspace_id(), base)
         .await?
         .ok_or_else(|| ApiError::no_such_warehouse(prefix))
+}
+
+/// The catalog ref an IRC `{prefix}` addresses: `main` (the base table
+/// pointers), or a named branch/tag projected as its own catalog (K-F2).
+#[derive(Debug, Clone)]
+pub(crate) enum CatalogRef {
+    /// The base warehouse — `tables.metadata_location` / `pointer_version`.
+    Main,
+    /// A named branch or tag, resolved to its registry row. Tags are
+    /// read-only; a commit against a tag prefix is rejected. Boxed to keep the
+    /// enum small (the record is far larger than the `Main` variant).
+    Branch(Box<meridian_store::branches::BranchRecord>),
+}
+
+impl CatalogRef {
+    /// The branch/tag registry row, when this is not `main`.
+    pub(crate) fn branch(&self) -> Option<&meridian_store::branches::BranchRecord> {
+        match self {
+            Self::Main => None,
+            Self::Branch(record) => Some(record),
+        }
+    }
+}
+
+/// Splits an IRC `{prefix}` into its base-warehouse name and optional branch
+/// suffix on the last `@`. Warehouse names cannot contain `@` (validated on
+/// create), so the split is unambiguous. `warehouse` → `("warehouse", None)`;
+/// `warehouse@dev` → `("warehouse", Some("dev"))`.
+#[must_use]
+pub(crate) fn split_prefix(prefix: &str) -> (&str, Option<&str>) {
+    match prefix.rsplit_once('@') {
+        Some((base, branch)) if !base.is_empty() && !branch.is_empty() => (base, Some(branch)),
+        _ => (prefix, None),
+    }
+}
+
+/// Resolves an IRC `{prefix}` to its base warehouse plus catalog ref, honoring
+/// the `warehouse@branch` projection (K-F2). An unknown branch suffix on a
+/// valid warehouse is 404 `NoSuchWarehouseException` (the projected catalog
+/// name does not exist), matching how engines discover a missing catalog.
+pub(crate) async fn resolve_catalog_ref(
+    pool: &PgPool,
+    prefix: &str,
+) -> Result<(WarehouseRecord, CatalogRef), ApiError> {
+    let (base, suffix) = split_prefix(prefix);
+    let warehouse = resolve_warehouse(pool, base).await?;
+    let Some(name) = suffix else {
+        return Ok((warehouse, CatalogRef::Main));
+    };
+    let record = meridian_store::branches::get_by_name(pool, tenancy::default_workspace_id(), name)
+        .await?
+        .filter(|b| b.state != "deleted")
+        .ok_or_else(|| ApiError::no_such_warehouse(prefix))?;
+    Ok((warehouse, CatalogRef::Branch(Box::new(record))))
 }
 
 /// Validates namespace levels: at least one level, no empty level, no level

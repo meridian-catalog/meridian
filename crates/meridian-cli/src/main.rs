@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use meridian_common::{AppConfig, MeridianError};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 mod bundle;
 mod client;
@@ -107,6 +107,16 @@ enum Command {
     #[command(subcommand)]
     Mirror(MirrorCommand),
 
+    /// Manage catalog branches & tags — Data CI/CD (Pillar K).
+    ///
+    /// A branch is a zero-copy divergent view of the catalog, mountable by any
+    /// engine as `warehouse@branch`. Commit to it from any engine, diff it,
+    /// gate it, and merge to main. `branch tag` manages immutable release
+    /// points. (Distinct from `tag`, which manages Pillar D classification
+    /// tags.)
+    #[command(subcommand)]
+    Branch(BranchCommand),
+
     /// Manage governance tags and their assignments (Pillar D).
     #[command(subcommand)]
     Tag(TagCommand),
@@ -175,6 +185,14 @@ enum Command {
     /// Manage certified data products — named bundles (Pillar G, G-F4).
     #[command(subcommand)]
     Product(ProductCommand),
+
+    /// Manage cross-org data shares (Pillar J, J-F1).
+    #[command(subcommand)]
+    Share(ShareCommand),
+
+    /// Browse the internal data marketplace and request access (Pillar J, J-F2).
+    #[command(subcommand)]
+    Marketplace(MarketplaceCommand),
 
     /// Translate a SQL statement between engine dialects (Pillar G, G-F1).
     ///
@@ -249,6 +267,176 @@ enum Command {
         server: String,
 
         /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// Manage generic AI assets — filesets, models, vector datasets (Pillar I).
+    #[command(subcommand)]
+    Asset(AssetCommand),
+
+    /// Pin and inspect immutable training runs (Pillar I, I-F2).
+    #[command(subcommand)]
+    TrainingRun(TrainingRunCommand),
+
+    /// Per-model provenance + the EU AI Act GPAI summary (Pillar I, I-F3).
+    #[command(subcommand)]
+    Provenance(ProvenanceCommand),
+
+    /// GDPR deletion campaigns — "right to be forgotten" evidence (Pillar I, I-F4).
+    #[command(subcommand)]
+    Deletion(DeletionCommand),
+}
+
+/// Generic AI assets (Pillar I, I-F1).
+#[derive(Debug, Subcommand)]
+enum AssetCommand {
+    /// Register an asset. `--kind fileset` also needs `--warehouse` +
+    /// `--storage-prefix`; models/vector datasets take `--metadata` JSON.
+    Create {
+        /// Asset kind: `fileset`, `model`, or `vector_dataset`.
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        owner: Option<String>,
+        /// Warehouse name (filesets only).
+        #[arg(long)]
+        warehouse: Option<String>,
+        /// The fileset storage prefix, `s3://bucket/prefix` (filesets only).
+        #[arg(long)]
+        storage_prefix: Option<String>,
+        /// Kind-specific metadata as a JSON object.
+        #[arg(long)]
+        metadata: Option<String>,
+        /// Repeatable key:value tag (e.g. --tag license:cc-by).
+        #[arg(long = "tag", value_name = "KEY:VALUE")]
+        tags: Vec<String>,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// List assets, optionally of one kind.
+    List {
+        #[arg(long = "type")]
+        kind: Option<String>,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// Show one asset by id.
+    Get {
+        id: String,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// Vend scoped, short-lived credentials for a fileset (bound to its prefix).
+    Credentials {
+        /// The fileset asset id.
+        id: String,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+}
+
+/// Training-run pinning (Pillar I, I-F2).
+#[derive(Debug, Subcommand)]
+enum TrainingRunCommand {
+    /// Pin a model version to exact table snapshots. Inputs repeat as
+    /// `--input table_ref=<ref>,snapshot_id=<id>[,table_id=<id>]`.
+    Pin {
+        #[arg(long)]
+        model: String,
+        #[arg(long)]
+        model_version: String,
+        /// Optional registered model asset id to link.
+        #[arg(long)]
+        model_asset_id: Option<String>,
+        /// Repeatable input pin: `table_ref=<ref>,snapshot_id=<n>[,table_id=<id>]`.
+        #[arg(long = "input", value_name = "SPEC", required = true)]
+        inputs: Vec<String>,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// Show an immutable training run by id.
+    Get {
+        id: String,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+}
+
+/// Per-model provenance + AI Act summary (Pillar I, I-F3).
+#[derive(Debug, Subcommand)]
+enum ProvenanceCommand {
+    /// The per-model lineage + propagated tags + dataset cards.
+    Show {
+        model: String,
+        #[arg(long)]
+        version: Option<String>,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// The EU AI Act GPAI training-content summary for a model.
+    AiActSummary {
+        model: String,
+        #[arg(long)]
+        version: Option<String>,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+}
+
+/// GDPR deletion campaigns (Pillar I, I-F4).
+#[derive(Debug, Subcommand)]
+enum DeletionCommand {
+    /// Open a deletion campaign for an erasure subject.
+    Open {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        subject: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// Add affected snapshots and freeze the model-exposure evidence. Snapshots
+    /// repeat as `--snapshot table_ref=<ref>,snapshot_id=<n>[,table_id=<id>][,branch=<b>]`.
+    AddSnapshots {
+        /// The campaign id.
+        id: String,
+        #[arg(long = "snapshot", value_name = "SPEC", required = true)]
+        snapshots: Vec<String>,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// Show the full GDPR evidence record for a campaign.
+    Evidence {
+        id: String,
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
         #[arg(long, value_name = "TOKEN")]
         token: Option<String>,
     },
@@ -616,6 +804,156 @@ enum MirrorCommand {
         #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
         server: String,
 
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+}
+
+/// Catalog branches & tags — Data CI/CD (Pillar K).
+#[derive(Debug, Subcommand)]
+enum BranchCommand {
+    /// Create a branch (K-F1). Zero-copy: it shares main's metadata until a
+    /// table diverges. Mount it from any engine as `warehouse@<name>`.
+    Create {
+        /// Branch name, unique per workspace.
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// The ref to diverge from (default `main`).
+        #[arg(long, default_value = "main")]
+        base: String,
+        /// Warehouse whose namespaces to scope to (required with --namespace).
+        #[arg(long)]
+        warehouse: Option<String>,
+        /// A namespace (dotted levels) the branch spans; repeatable. Omit for
+        /// all namespaces.
+        #[arg(long = "namespace", value_name = "NS")]
+        namespaces: Vec<String>,
+        /// Make it an ephemeral PR branch expiring in this many seconds (K-F3).
+        #[arg(long, value_name = "SECONDS")]
+        expires_in_s: Option<i64>,
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// List branches (and tags).
+    List {
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// Show the schema + snapshot + row-count delta of a branch vs main (K-F1).
+    Diff {
+        /// Branch name.
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// Check the merge gate: contracts on the branch head (K-F3). Exits
+    /// non-zero when the gate fails — drop into a CI job before merging.
+    Gate {
+        /// Branch name.
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// Merge a branch into main (K-F1): gate + conflict checked, fast-forward.
+    Merge {
+        /// Branch name.
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// Delete a branch (K-F3 teardown).
+    Delete {
+        /// Branch name.
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// Delete expired ephemeral branches (K-F3).
+    Sweep {
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+
+    /// Manage immutable catalog tags — release points like `q2-close` (K-F1).
+    #[command(subcommand)]
+    Tag(CatalogTagCommand),
+}
+
+/// Immutable catalog tags (Pillar K, K-F1) — distinct from Pillar D
+/// classification tags (`meridian tag`).
+#[derive(Debug, Subcommand)]
+enum CatalogTagCommand {
+    /// Create an immutable tag pinning a ref's current state.
+    Create {
+        /// Tag name, unique per workspace.
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// The ref to freeze (default `main`).
+        #[arg(long = "from", default_value = "main")]
+        from_ref: String,
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// List tags.
+    List {
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
+        /// Bearer token (required when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// Delete a tag.
+    Delete {
+        /// Tag name.
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Base URL of the Meridian server.
+        #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
+        server: String,
         /// Bearer token (required when the server runs auth.mode = "oidc").
         #[arg(long, value_name = "TOKEN")]
         token: Option<String>,
@@ -1254,6 +1592,126 @@ enum ProductCommand {
     },
 }
 
+/// `meridian share ...` — cross-org data sharing (Pillar J, J-F1).
+#[derive(Debug, Subcommand)]
+enum ShareCommand {
+    /// List the workspace's shares (tokens are never shown).
+    List {
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Show one share with its grants.
+    Get {
+        /// The share id.
+        id: String,
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Create a share for an external recipient. The token is printed once —
+    /// deliver it to the recipient over a secure channel.
+    Create {
+        /// Machine name (unique per workspace).
+        #[arg(long)]
+        name: String,
+        /// External recipient identifier (e.g. org:acme).
+        #[arg(long)]
+        recipient: String,
+        /// Optional terms of use the recipient must accept before data serves.
+        #[arg(long)]
+        terms: Option<String>,
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Add a securable to a share, with optional row filter / column mask.
+    Grant {
+        /// The share id.
+        id: String,
+        /// Securable kind: table | view | `data_product`.
+        #[arg(long)]
+        kind: String,
+        /// Stable securable reference (e.g. table:<id>).
+        #[arg(long = "ref", value_name = "REF")]
+        securable_ref: String,
+        /// Optional advisory row filter (a boolean SQL predicate).
+        #[arg(long)]
+        row_filter: Option<String>,
+        /// Optional column mask (repeatable): a column to hide from the recipient.
+        #[arg(long = "mask", value_name = "COLUMN")]
+        mask: Vec<String>,
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Remove a grant from a share by grant id.
+    Ungrant {
+        /// The grant id.
+        grant_id: String,
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Revoke a share (instant: the recipient is denied and creds expire).
+    Revoke {
+        /// The share id.
+        id: String,
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Delete a share and its grants (prefer revoke to retain history).
+    Delete {
+        /// The share id.
+        id: String,
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+}
+
+/// `meridian marketplace ...` — the internal data marketplace (Pillar J, J-F2).
+#[derive(Debug, Subcommand)]
+enum MarketplaceCommand {
+    /// Browse the certified-data-product gallery (certified first).
+    Products {
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Request access to an asset (creates a pending access request).
+    Request {
+        /// Securable type: warehouse | namespace | table | view.
+        #[arg(long)]
+        kind: String,
+        /// Stable securable reference.
+        #[arg(long = "ref", value_name = "REF")]
+        securable_ref: String,
+        /// Requested privilege (default READ).
+        #[arg(long, default_value = "READ")]
+        privilege: String,
+        /// Declared purpose (purpose-based access).
+        #[arg(long)]
+        purpose: String,
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// List access requests (optionally filtered by state).
+    Requests {
+        /// State filter: pending | approved | denied | expired.
+        #[arg(long)]
+        state: Option<String>,
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Approve or deny a pending access request.
+    Decide {
+        /// The request id.
+        id: String,
+        /// Approve (default is deny).
+        #[arg(long)]
+        approve: bool,
+        /// Optional decision reason.
+        #[arg(long)]
+        reason: Option<String>,
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -1277,6 +1735,7 @@ fn main() -> ExitCode {
         Command::Events(command) => run_async(run_events(command)),
         Command::Maintenance(command) => run_async(run_maintenance(command)),
         Command::Mirror(command) => run_async(run_mirror(command)),
+        Command::Branch(command) => run_async(run_branch(command)),
         Command::Tag(command) => run_async(run_tag(command)),
         Command::Policy(command) => run_async(run_policy(command)),
         Command::Govern(command) => run_async(run_govern(command)),
@@ -1301,6 +1760,8 @@ fn main() -> ExitCode {
         Command::Metric(command) => run_async(run_metric(command)),
         Command::Glossary(command) => run_async(run_glossary(command)),
         Command::Product(command) => run_async(run_product(command)),
+        Command::Share(command) => run_async(run_share(command)),
+        Command::Marketplace(command) => run_async(run_marketplace(command)),
         Command::Transpile {
             sql,
             from_dialect,
@@ -1323,6 +1784,10 @@ fn main() -> ExitCode {
             server,
             token,
         } => run_async(run_apply(file, server, token)),
+        Command::Asset(command) => run_async(run_asset(command)),
+        Command::TrainingRun(command) => run_async(run_training_run(command)),
+        Command::Provenance(command) => run_async(run_provenance(command)),
+        Command::Deletion(command) => run_async(run_deletion(command)),
     };
 
     match result {
@@ -2173,6 +2638,302 @@ async fn run_mirror(command: MirrorCommand) -> Result<(), CliError> {
     }
 }
 
+/// `meridian branch ...` — catalog branches & tags, Data CI/CD (Pillar K).
+#[allow(clippy::too_many_lines)] // one match arm per branch subcommand
+async fn run_branch(command: BranchCommand) -> Result<(), CliError> {
+    match command {
+        BranchCommand::Create {
+            name,
+            base,
+            warehouse,
+            namespaces,
+            expires_in_s,
+            server,
+            token,
+        } => {
+            let mut body = json!({ "name": name, "base_ref": base });
+            if !namespaces.is_empty() {
+                body["namespaces"] = json!(namespaces);
+                if let Some(wh) = &warehouse {
+                    body["warehouse"] = json!(wh);
+                }
+            }
+            if let Some(exp) = expires_in_s {
+                body["expires_in_s"] = json!(exp);
+            }
+            let created =
+                client::gov_post(&server, token.as_deref(), "/api/v2/branches", &body).await?;
+            let id = created.get("id").and_then(Value::as_str).unwrap_or("?");
+            println!("created branch {name} (id {id}, base {base})");
+            println!(
+                "  mount from any engine as:  {}@{name}",
+                warehouse.as_deref().unwrap_or("<warehouse>")
+            );
+            Ok(())
+        }
+        BranchCommand::List { server, token } => {
+            let body = client::gov_get(&server, token.as_deref(), "/api/v2/branches", &[]).await?;
+            print_branch_list(&body);
+            Ok(())
+        }
+        BranchCommand::Diff {
+            name,
+            server,
+            token,
+        } => {
+            let body = client::gov_get(
+                &server,
+                token.as_deref(),
+                &format!("/api/v2/branches/{name}/diff"),
+                &[],
+            )
+            .await?;
+            print_branch_diff(&name, &body);
+            Ok(())
+        }
+        BranchCommand::Gate {
+            name,
+            server,
+            token,
+        } => {
+            let body = client::gov_get(
+                &server,
+                token.as_deref(),
+                &format!("/api/v2/branches/{name}/gate"),
+                &[],
+            )
+            .await?;
+            print_branch_gate(&name, &body)
+        }
+        BranchCommand::Merge {
+            name,
+            server,
+            token,
+        } => {
+            let body = client::gov_post(
+                &server,
+                token.as_deref(),
+                &format!("/api/v2/branches/{name}/merge"),
+                &json!({}),
+            )
+            .await?;
+            let merged = body
+                .get("merged_tables")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            println!("merged branch {name} into main: {merged} table(s) fast-forwarded");
+            Ok(())
+        }
+        BranchCommand::Delete {
+            name,
+            server,
+            token,
+        } => {
+            client::gov_delete(
+                &server,
+                token.as_deref(),
+                &format!("/api/v2/branches/{name}"),
+            )
+            .await?;
+            println!("deleted branch {name}");
+            Ok(())
+        }
+        BranchCommand::Sweep { server, token } => {
+            let body = client::gov_post(
+                &server,
+                token.as_deref(),
+                "/api/v2/branches/sweep",
+                &json!({}),
+            )
+            .await?;
+            let swept = body.get("swept").and_then(Value::as_array);
+            match swept.filter(|s| !s.is_empty()) {
+                Some(s) => {
+                    println!("swept {} expired branch(es):", s.len());
+                    for name in s {
+                        println!("  - {}", name.as_str().unwrap_or("?"));
+                    }
+                }
+                None => println!("no expired branches to sweep"),
+            }
+            Ok(())
+        }
+        BranchCommand::Tag(command) => run_catalog_tag(command).await,
+    }
+}
+
+/// `meridian branch tag ...` — immutable catalog tags (Pillar K).
+async fn run_catalog_tag(command: CatalogTagCommand) -> Result<(), CliError> {
+    match command {
+        CatalogTagCommand::Create {
+            name,
+            from_ref,
+            server,
+            token,
+        } => {
+            let created = client::gov_post(
+                &server,
+                token.as_deref(),
+                "/api/v2/tags",
+                &json!({ "name": name, "from_ref": from_ref }),
+            )
+            .await?;
+            let id = created.get("id").and_then(Value::as_str).unwrap_or("?");
+            println!("created tag {name} (id {id}, from {from_ref})");
+            Ok(())
+        }
+        CatalogTagCommand::List { server, token } => {
+            let body = client::gov_get(&server, token.as_deref(), "/api/v2/tags", &[]).await?;
+            let tags = body.get("tags").and_then(Value::as_array);
+            match tags.filter(|t| !t.is_empty()) {
+                None => {
+                    println!("no tags");
+                    Ok(())
+                }
+                Some(tags) => {
+                    let rows: Vec<Vec<String>> = tags
+                        .iter()
+                        .map(|t| vec![field_str(t, "name"), field_str(t, "base_ref")])
+                        .collect();
+                    print!("{}", client::render_table(&["NAME", "FROM"], &rows));
+                    Ok(())
+                }
+            }
+        }
+        CatalogTagCommand::Delete {
+            name,
+            server,
+            token,
+        } => {
+            client::gov_delete(&server, token.as_deref(), &format!("/api/v2/tags/{name}")).await?;
+            println!("deleted tag {name}");
+            Ok(())
+        }
+    }
+}
+
+/// Renders the `branch list` response as a table of branches and tags.
+fn print_branch_list(body: &Value) {
+    let branches = body.get("branches").and_then(Value::as_array);
+    let tags = body.get("tags").and_then(Value::as_array);
+    if branches.is_none_or(Vec::is_empty) && tags.is_none_or(Vec::is_empty) {
+        println!("no branches or tags");
+        return;
+    }
+    let rows: Vec<Vec<String>> = branches
+        .into_iter()
+        .flatten()
+        .chain(tags.into_iter().flatten())
+        .map(|b| {
+            vec![
+                field_str(b, "name"),
+                field_str(b, "kind"),
+                field_str(b, "base_ref"),
+                field_str(b, "state"),
+                b.get("diverged_tables")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0)
+                    .to_string(),
+                b.get("expires_at")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-")
+                    .to_owned(),
+            ]
+        })
+        .collect();
+    print!(
+        "{}",
+        client::render_table(
+            &["NAME", "KIND", "BASE", "STATE", "DIVERGED", "EXPIRES"],
+            &rows
+        )
+    );
+}
+
+/// Renders the `branch diff` response.
+fn print_branch_diff(name: &str, body: &Value) {
+    let count = body
+        .get("diverged_table_count")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    println!(
+        "branch {name} vs {}: {count} diverged table(s)",
+        field_str(body, "base")
+    );
+    let Some(tables) = body.get("tables").and_then(Value::as_array) else {
+        return;
+    };
+    let cols = |t: &Value, key: &str| {
+        t.get("schema")
+            .and_then(|s| s.get(key))
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len)
+    };
+    let rows: Vec<Vec<String>> = tables
+        .iter()
+        .map(|t| {
+            let row_delta = t
+                .get("rows")
+                .and_then(|r| r.get("delta"))
+                .map_or_else(|| "-".to_owned(), ToString::to_string);
+            vec![
+                field_str(t, "table"),
+                format!(
+                    "+{}/-{}/~{}",
+                    cols(t, "added_columns"),
+                    cols(t, "dropped_columns"),
+                    cols(t, "type_changed_columns")
+                ),
+                row_delta,
+            ]
+        })
+        .collect();
+    print!(
+        "{}",
+        client::render_table(&["TABLE", "COLS(+/-/~)", "ROW_DELTA"], &rows)
+    );
+}
+
+/// Renders the `branch gate` response; returns non-zero (an `Err`) on failure
+/// so a CI job blocks a merge when the gate fails.
+fn print_branch_gate(name: &str, body: &Value) -> Result<(), CliError> {
+    let passes = body.get("passes").and_then(Value::as_bool).unwrap_or(false);
+    if passes {
+        println!("gate PASS for branch {name}");
+        if let Some(warnings) = body
+            .get("warnings")
+            .and_then(Value::as_array)
+            .filter(|w| !w.is_empty())
+        {
+            println!("  {} warning(s):", warnings.len());
+            for entry in warnings {
+                println!(
+                    "  - {} on {}",
+                    field_str(entry, "contract"),
+                    field_str(entry, "table")
+                );
+            }
+        }
+        Ok(())
+    } else {
+        println!("gate FAIL for branch {name}");
+        for entry in body
+            .get("blocking")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            println!(
+                "  - {} on {} ({})",
+                field_str(entry, "contract"),
+                field_str(entry, "table"),
+                field_str(entry, "mode")
+            );
+        }
+        Err(CliError(format!("merge gate failed for branch {name}")))
+    }
+}
+
 /// `meridian sprawl` — the cross-catalog sprawl summary as a set of tables.
 async fn run_sprawl(
     stale_threshold_s: Option<i64>,
@@ -2782,6 +3543,318 @@ async fn run_govern(command: GovernCommand) -> Result<(), CliError> {
                     .and_then(Value::as_array)
                     .map_or(0, Vec::len),
             );
+            Ok(())
+        }
+    }
+}
+
+/// Parses a `k=v,k=v` spec string into its pairs (CLI input pins / snapshots).
+fn parse_kv_spec(spec: &str) -> Result<std::collections::HashMap<String, String>, CliError> {
+    let mut map = std::collections::HashMap::new();
+    for part in spec.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (k, v) = part.split_once('=').ok_or_else(|| {
+            CliError(format!(
+                "malformed spec segment {part:?}: expected key=value"
+            ))
+        })?;
+        map.insert(k.trim().to_owned(), v.trim().to_owned());
+    }
+    Ok(map)
+}
+
+/// Prints a JSON value pretty (reports that are read whole, not tabulated).
+fn print_json(v: &Value) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
+    );
+}
+
+/// `meridian asset ...` (Pillar I, I-F1).
+async fn run_asset(command: AssetCommand) -> Result<(), CliError> {
+    match command {
+        AssetCommand::Create {
+            kind,
+            name,
+            description,
+            owner,
+            warehouse,
+            storage_prefix,
+            metadata,
+            tags,
+            server,
+            token,
+        } => {
+            let metadata_val: Value = match metadata {
+                Some(raw) => serde_json::from_str(&raw)
+                    .map_err(|e| CliError(format!("--metadata is not valid JSON: {e}")))?,
+                None => serde_json::json!({}),
+            };
+            let body = serde_json::json!({
+                "kind": kind,
+                "name": name,
+                "description": description,
+                "owner": owner,
+                "warehouse": warehouse,
+                "storage_prefix": storage_prefix,
+                "metadata": metadata_val,
+                "tags": tags,
+            });
+            let created =
+                client::gov_post(&server, token.as_deref(), "/api/v2/assets", &body).await?;
+            println!(
+                "created {} asset {} ({})",
+                field_str(&created, "kind"),
+                field_str(&created, "id"),
+                field_str(&created, "name"),
+            );
+            Ok(())
+        }
+        AssetCommand::List {
+            kind,
+            server,
+            token,
+        } => {
+            let query: Vec<(&str, String)> = kind.map(|k| vec![("type", k)]).unwrap_or_default();
+            let body = client::gov_get(&server, token.as_deref(), "/api/v2/assets", &query).await?;
+            let assets = body
+                .get("assets")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let rows: Vec<Vec<String>> = assets
+                .iter()
+                .map(|a| {
+                    vec![
+                        field_str(a, "id"),
+                        field_str(a, "kind"),
+                        field_str(a, "name"),
+                        field_str(a, "storage_prefix"),
+                    ]
+                })
+                .collect();
+            print!(
+                "{}",
+                client::render_table(&["ID", "KIND", "NAME", "STORAGE PREFIX"], &rows)
+            );
+            Ok(())
+        }
+        AssetCommand::Get { id, server, token } => {
+            let body = client::gov_get(
+                &server,
+                token.as_deref(),
+                &format!("/api/v2/assets/{id}"),
+                &[],
+            )
+            .await?;
+            print_json(&body);
+            Ok(())
+        }
+        AssetCommand::Credentials { id, server, token } => {
+            let body = client::gov_post(
+                &server,
+                token.as_deref(),
+                &format!("/api/v2/assets/{id}/credentials"),
+                &serde_json::json!({}),
+            )
+            .await?;
+            print_json(&body);
+            Ok(())
+        }
+    }
+}
+
+/// `meridian training-run ...` (Pillar I, I-F2).
+async fn run_training_run(command: TrainingRunCommand) -> Result<(), CliError> {
+    match command {
+        TrainingRunCommand::Pin {
+            model,
+            model_version,
+            model_asset_id,
+            inputs,
+            server,
+            token,
+        } => {
+            let mut input_bodies = Vec::with_capacity(inputs.len());
+            for spec in &inputs {
+                let kv = parse_kv_spec(spec)?;
+                let table_ref = kv
+                    .get("table_ref")
+                    .ok_or_else(|| CliError(format!("input {spec:?} is missing table_ref")))?;
+                let snapshot_id: i64 = kv
+                    .get("snapshot_id")
+                    .ok_or_else(|| CliError(format!("input {spec:?} is missing snapshot_id")))?
+                    .parse()
+                    .map_err(|_| {
+                        CliError(format!("input {spec:?} has a non-integer snapshot_id"))
+                    })?;
+                input_bodies.push(serde_json::json!({
+                    "table_ref": table_ref,
+                    "table_id": kv.get("table_id"),
+                    "snapshot_id": snapshot_id,
+                }));
+            }
+            let body = serde_json::json!({
+                "model": model,
+                "model_version": model_version,
+                "model_asset_id": model_asset_id,
+                "inputs": input_bodies,
+            });
+            let created =
+                client::gov_post(&server, token.as_deref(), "/api/v2/training-runs", &body).await?;
+            println!(
+                "pinned training run {} for {}@{} ({} inputs)",
+                field_str(&created, "id"),
+                field_str(&created, "model"),
+                field_str(&created, "model_version"),
+                created
+                    .get("inputs")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len),
+            );
+            Ok(())
+        }
+        TrainingRunCommand::Get { id, server, token } => {
+            let body = client::gov_get(
+                &server,
+                token.as_deref(),
+                &format!("/api/v2/training-runs/{id}"),
+                &[],
+            )
+            .await?;
+            print_json(&body);
+            Ok(())
+        }
+    }
+}
+
+/// `meridian provenance ...` (Pillar I, I-F3).
+async fn run_provenance(command: ProvenanceCommand) -> Result<(), CliError> {
+    match command {
+        ProvenanceCommand::Show {
+            model,
+            version,
+            server,
+            token,
+        } => {
+            let query: Vec<(&str, String)> =
+                version.map(|v| vec![("version", v)]).unwrap_or_default();
+            let body = client::gov_get(
+                &server,
+                token.as_deref(),
+                &format!("/api/v2/models/{model}/provenance"),
+                &query,
+            )
+            .await?;
+            print_json(&body);
+            Ok(())
+        }
+        ProvenanceCommand::AiActSummary {
+            model,
+            version,
+            server,
+            token,
+        } => {
+            let query: Vec<(&str, String)> =
+                version.map(|v| vec![("version", v)]).unwrap_or_default();
+            let body = client::gov_get(
+                &server,
+                token.as_deref(),
+                &format!("/api/v2/models/{model}/ai-act-summary"),
+                &query,
+            )
+            .await?;
+            print_json(&body);
+            Ok(())
+        }
+    }
+}
+
+/// `meridian deletion ...` (Pillar I, I-F4).
+async fn run_deletion(command: DeletionCommand) -> Result<(), CliError> {
+    match command {
+        DeletionCommand::Open {
+            name,
+            subject,
+            reason,
+            server,
+            token,
+        } => {
+            let body = serde_json::json!({
+                "name": name,
+                "subject": subject,
+                "reason": reason,
+            });
+            let created = client::gov_post(
+                &server,
+                token.as_deref(),
+                "/api/v2/deletion-campaigns",
+                &body,
+            )
+            .await?;
+            println!(
+                "opened deletion campaign {} ({})",
+                field_str(&created, "id"),
+                field_str(&created, "name"),
+            );
+            Ok(())
+        }
+        DeletionCommand::AddSnapshots {
+            id,
+            snapshots,
+            server,
+            token,
+        } => {
+            let mut snapshot_bodies = Vec::with_capacity(snapshots.len());
+            for spec in &snapshots {
+                let kv = parse_kv_spec(spec)?;
+                let table_ref = kv
+                    .get("table_ref")
+                    .ok_or_else(|| CliError(format!("snapshot {spec:?} is missing table_ref")))?;
+                let snapshot_id: i64 = kv
+                    .get("snapshot_id")
+                    .ok_or_else(|| CliError(format!("snapshot {spec:?} is missing snapshot_id")))?
+                    .parse()
+                    .map_err(|_| {
+                        CliError(format!("snapshot {spec:?} has a non-integer snapshot_id"))
+                    })?;
+                snapshot_bodies.push(serde_json::json!({
+                    "table_ref": table_ref,
+                    "table_id": kv.get("table_id"),
+                    "snapshot_id": snapshot_id,
+                    "branch": kv.get("branch"),
+                }));
+            }
+            let body = serde_json::json!({ "snapshots": snapshot_bodies });
+            let result = client::gov_post(
+                &server,
+                token.as_deref(),
+                &format!("/api/v2/deletion-campaigns/{id}/snapshots"),
+                &body,
+            )
+            .await?;
+            println!(
+                "recorded {} model exposure(s) for campaign {id}",
+                result
+                    .get("model_exposures_recorded")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0),
+            );
+            Ok(())
+        }
+        DeletionCommand::Evidence { id, server, token } => {
+            let body = client::gov_get(
+                &server,
+                token.as_deref(),
+                &format!("/api/v2/deletion-campaigns/{id}/evidence"),
+                &[],
+            )
+            .await?;
+            print_json(&body);
             Ok(())
         }
     }
@@ -3415,6 +4488,245 @@ async fn run_product(command: ProductCommand) -> Result<(), CliError> {
                 field_str(&body, "health_rollup"),
                 field_i64(&body, "member_total"),
             );
+        }
+    }
+    Ok(())
+}
+
+/// `meridian share ...` — cross-org data sharing (Pillar J, J-F1).
+#[allow(clippy::too_many_lines)] // one match arm per share subcommand
+async fn run_share(command: ShareCommand) -> Result<(), CliError> {
+    match command {
+        ShareCommand::List { server } => {
+            let body = client::q_get(
+                &server.server,
+                server.token.as_deref(),
+                "/api/v2/shares",
+                &[],
+            )
+            .await?;
+            let empty = Vec::new();
+            let list = body["shares"].as_array().unwrap_or(&empty);
+            if list.is_empty() {
+                println!("(no shares)");
+            }
+            for s in list {
+                let state = if s["revoked"].as_bool().unwrap_or(false) {
+                    "revoked"
+                } else {
+                    "active"
+                };
+                println!(
+                    "{}  {}  -> {}  [{}]",
+                    field_str(s, "id"),
+                    field_str(s, "name"),
+                    field_str(s, "recipient"),
+                    state,
+                );
+            }
+        }
+        ShareCommand::Get { id, server } => {
+            let body = client::q_get(
+                &server.server,
+                server.token.as_deref(),
+                &format!("/api/v2/shares/{id}"),
+                &[],
+            )
+            .await?;
+            println!(
+                "{}  -> {}  revoked={}",
+                field_str(&body, "name"),
+                field_str(&body, "recipient"),
+                body["revoked"].as_bool().unwrap_or(false),
+            );
+            if let Some(grants) = body.get("grants").and_then(Value::as_array) {
+                for g in grants {
+                    println!(
+                        "  - {} {}{}{}",
+                        field_str(g, "securable_kind"),
+                        field_str(g, "securable_ref"),
+                        g["row_filter"]
+                            .as_str()
+                            .map(|f| format!("  filter[{f}]"))
+                            .unwrap_or_default(),
+                        g["column_mask"]
+                            .as_array()
+                            .filter(|m| !m.is_empty())
+                            .map(|m| format!("  mask{m:?}"))
+                            .unwrap_or_default(),
+                    );
+                }
+            }
+        }
+        ShareCommand::Create {
+            name,
+            recipient,
+            terms,
+            server,
+        } => {
+            let payload = serde_json::json!({
+                "name": name,
+                "recipient": recipient,
+                "terms": terms,
+            });
+            let body = client::q_post(
+                &server.server,
+                server.token.as_deref(),
+                "/api/v2/shares",
+                Some(&payload),
+            )
+            .await?;
+            println!("created share {}", field_str(&body, "id"));
+            // The token is shown exactly once — the operator must copy it now.
+            println!("token: {}", field_str(&body, "token"));
+            println!("(deliver the token to the recipient over a secure channel)");
+        }
+        ShareCommand::Grant {
+            id,
+            kind,
+            securable_ref,
+            row_filter,
+            mask,
+            server,
+        } => {
+            let payload = serde_json::json!({
+                "securable_kind": kind,
+                "securable_ref": securable_ref,
+                "row_filter": row_filter,
+                "column_mask": if mask.is_empty() { None } else { Some(mask) },
+            });
+            let body = client::q_post(
+                &server.server,
+                server.token.as_deref(),
+                &format!("/api/v2/shares/{id}/grants"),
+                Some(&payload),
+            )
+            .await?;
+            println!("added grant {}", field_str(&body, "id"));
+        }
+        ShareCommand::Ungrant { grant_id, server } => {
+            client::q_delete(
+                &server.server,
+                server.token.as_deref(),
+                &format!("/api/v2/shares/grants/{grant_id}"),
+            )
+            .await?;
+            println!("removed grant {grant_id}");
+        }
+        ShareCommand::Revoke { id, server } => {
+            client::q_post(
+                &server.server,
+                server.token.as_deref(),
+                &format!("/api/v2/shares/{id}/revoke"),
+                None,
+            )
+            .await?;
+            println!("revoked share {id}");
+        }
+        ShareCommand::Delete { id, server } => {
+            client::q_delete(
+                &server.server,
+                server.token.as_deref(),
+                &format!("/api/v2/shares/{id}"),
+            )
+            .await?;
+            println!("deleted share {id}");
+        }
+    }
+    Ok(())
+}
+
+/// `meridian marketplace ...` — the internal data marketplace (Pillar J, J-F2).
+async fn run_marketplace(command: MarketplaceCommand) -> Result<(), CliError> {
+    match command {
+        MarketplaceCommand::Products { server } => {
+            let body = client::q_get(
+                &server.server,
+                server.token.as_deref(),
+                "/api/v2/marketplace/products",
+                &[],
+            )
+            .await?;
+            let empty = Vec::new();
+            let list = body["products"].as_array().unwrap_or(&empty);
+            if list.is_empty() {
+                println!("(no products)");
+            }
+            for p in list {
+                println!(
+                    "{}  {}  [{}]",
+                    field_str(p, "id"),
+                    field_str(p, "name"),
+                    field_str(p, "certification"),
+                );
+            }
+        }
+        MarketplaceCommand::Request {
+            kind,
+            securable_ref,
+            privilege,
+            purpose,
+            server,
+        } => {
+            let payload = serde_json::json!({
+                "securable_type": kind,
+                "securable_id": securable_ref,
+                "privilege": privilege,
+                "purpose": purpose,
+            });
+            let body = client::q_post(
+                &server.server,
+                server.token.as_deref(),
+                "/api/v2/marketplace/requests",
+                Some(&payload),
+            )
+            .await?;
+            println!(
+                "created access request {} [{}]",
+                field_str(&body, "id"),
+                field_str(&body, "state"),
+            );
+        }
+        MarketplaceCommand::Requests { state, server } => {
+            let query: Vec<(&str, String)> = state.map(|s| vec![("state", s)]).unwrap_or_default();
+            let body = client::q_get(
+                &server.server,
+                server.token.as_deref(),
+                "/api/v2/marketplace/requests",
+                &query,
+            )
+            .await?;
+            let empty = Vec::new();
+            let list = body["requests"].as_array().unwrap_or(&empty);
+            if list.is_empty() {
+                println!("(no requests)");
+            }
+            for r in list {
+                println!(
+                    "{}  {} on {}  [{}]  by {}",
+                    field_str(r, "id"),
+                    field_str(r, "privilege"),
+                    field_str(r, "securable_id"),
+                    field_str(r, "state"),
+                    field_str(r, "principal"),
+                );
+            }
+        }
+        MarketplaceCommand::Decide {
+            id,
+            approve,
+            reason,
+            server,
+        } => {
+            let payload = serde_json::json!({ "approve": approve, "reason": reason });
+            let body = client::q_post(
+                &server.server,
+                server.token.as_deref(),
+                &format!("/api/v2/marketplace/requests/{id}/decide"),
+                Some(&payload),
+            )
+            .await?;
+            println!("request {id} is now [{}]", field_str(&body, "state"));
         }
     }
     Ok(())

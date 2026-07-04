@@ -285,6 +285,76 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v2/products/{id}/status",
             get(routes::semantics::product_status),
         )
+        // Cross-org data sharing (Pillar J, J-F1) management API: shares +
+        // grants + revoke. Management-gated (see routes::shares). The
+        // recipient-facing IRC endpoint is mounted separately below at
+        // `/share/{token}` and is token-authenticated, not OIDC. The
+        // internal marketplace (J-F2) reuses the Pillar-G data products and
+        // the Pillar-D access_requests table.
+        .route(
+            "/api/v2/shares",
+            get(routes::shares::list_shares).post(routes::shares::create_share),
+        )
+        .route(
+            "/api/v2/shares/{id}",
+            get(routes::shares::get_share).delete(routes::shares::delete_share),
+        )
+        .route(
+            "/api/v2/shares/{id}/revoke",
+            post(routes::shares::revoke_share),
+        )
+        .route(
+            "/api/v2/shares/{id}/grants",
+            post(routes::shares::add_grant),
+        )
+        .route(
+            "/api/v2/shares/grants/{grant_id}",
+            delete(routes::shares::remove_grant),
+        )
+        .route(
+            "/api/v2/marketplace/products",
+            get(routes::shares::marketplace_products),
+        )
+        .route(
+            "/api/v2/marketplace/requests",
+            get(routes::shares::list_requests).post(routes::shares::request_access),
+        )
+        .route(
+            "/api/v2/marketplace/requests/{id}/decide",
+            post(routes::shares::decide_request),
+        )
+        // The recipient-facing data-sharing IRC endpoint (Pillar J, J-F1): a
+        // distinct read-only Iceberg REST catalog per share, addressed by the
+        // share's opaque token in the path. Authenticated by the token (the
+        // `/share/` prefix is exempt from the OIDC middleware — see
+        // crate::auth); serves only the shared assets, read-only, with vended
+        // read-only credentials and the grant's column mask applied. Every
+        // write verb is answered 403 (a share is read-only by construction).
+        .route(
+            "/share/{token}/v1/config",
+            get(routes::shares::recipient_config),
+        )
+        .route("/share/{token}/terms", get(routes::shares::get_terms))
+        .route(
+            "/share/{token}/terms/accept",
+            post(routes::shares::accept_terms),
+        )
+        .route(
+            "/share/{token}/v1/namespaces",
+            get(routes::shares::recipient_list_namespaces)
+                .post(routes::shares::recipient_write_rejected),
+        )
+        .route(
+            "/share/{token}/v1/namespaces/{namespace}/tables",
+            get(routes::shares::recipient_list_tables)
+                .post(routes::shares::recipient_write_rejected),
+        )
+        .route(
+            "/share/{token}/v1/namespaces/{namespace}/tables/{table}",
+            get(routes::shares::recipient_load_table)
+                .post(routes::shares::recipient_write_rejected)
+                .delete(routes::shares::recipient_write_rejected),
+        )
         // Events surface (webhooks, feed, durable consumers) — see
         // routes::events for the authorization policy.
         .route(
@@ -389,6 +459,41 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v2/federation/sprawl",
             get(routes::federation::get_sprawl),
         )
+        // Branching & Data CI/CD (Pillar K): catalog-level branch/tag CRUD
+        // (K-F1), diff, merge-gate (K-F3) + merge (K-F1), ephemeral-branch
+        // sweep (K-F3). All management-gated (see routes::branches). The
+        // branch-as-catalog projection (K-F2) needs NO route here — a branch is
+        // read/written through the ordinary table endpoints via the
+        // `warehouse@branch` prefix, resolved in routes::namespaces.
+        .route(
+            "/api/v2/branches",
+            get(routes::branches::list_branches).post(routes::branches::create_branch),
+        )
+        .route(
+            "/api/v2/branches/sweep",
+            post(routes::branches::sweep_branches),
+        )
+        .route(
+            "/api/v2/branches/{name}",
+            get(routes::branches::get_branch).delete(routes::branches::delete_branch),
+        )
+        .route(
+            "/api/v2/branches/{name}/diff",
+            get(routes::branches::diff_branch),
+        )
+        .route(
+            "/api/v2/branches/{name}/gate",
+            get(routes::branches::branch_gate),
+        )
+        .route(
+            "/api/v2/branches/{name}/merge",
+            post(routes::branches::merge_branch),
+        )
+        .route(
+            "/api/v2/tags",
+            get(routes::branches::list_tags).post(routes::branches::create_tag),
+        )
+        .route("/api/v2/tags/{name}", delete(routes::branches::delete_tag))
         // Cross-engine access governance (Pillar D): tags + assignments +
         // coverage (D-F3), versioned policies + bindings + dry-run (D-F1), the
         // effective-policy / who-can-see-what / drift / evidence analytics
@@ -614,6 +719,54 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v2/workbench/snippet",
             post(routes::workbench::generate_snippet),
+        )
+        // AI Asset Governance (Pillar I): generic assets (filesets, models,
+        // vector datasets) with grants + fileset credential vending (I-F1),
+        // immutable training-run pinning (I-F2), per-model provenance + the EU
+        // AI Act GPAI summary (I-F3), and GDPR deletion-campaign evidence
+        // (I-F4). Asset lifecycle + training-run/campaign mutations are
+        // management-gated; a fileset vend is RBAC-gated on the asset securable.
+        .route(
+            "/api/v2/assets",
+            get(routes::assets::list_assets).post(routes::assets::create_asset),
+        )
+        .route("/api/v2/assets/search", get(routes::assets::search_assets))
+        .route("/api/v2/assets/{id}", get(routes::assets::get_asset))
+        .route(
+            "/api/v2/assets/{id}/credentials",
+            post(routes::assets::vend_fileset_credentials),
+        )
+        .route(
+            "/api/v2/training-runs",
+            post(routes::assets::create_training_run),
+        )
+        .route(
+            "/api/v2/training-runs/{id}",
+            get(routes::assets::get_training_run),
+        )
+        .route(
+            "/api/v2/models/{model}/provenance",
+            get(routes::assets::model_provenance),
+        )
+        .route(
+            "/api/v2/models/{model}/ai-act-summary",
+            get(routes::assets::model_ai_act_summary),
+        )
+        .route(
+            "/api/v2/deletion-campaigns",
+            get(routes::assets::list_campaigns).post(routes::assets::create_campaign),
+        )
+        .route(
+            "/api/v2/deletion-campaigns/{id}/snapshots",
+            post(routes::assets::add_campaign_snapshots),
+        )
+        .route(
+            "/api/v2/deletion-campaigns/{id}/evidence",
+            get(routes::assets::campaign_evidence),
+        )
+        .route(
+            "/api/v2/deletion-campaigns/{id}/expire",
+            post(routes::assets::mark_snapshot_expired),
         )
         // Unmatched routes and wrong methods must still speak the IRC error
         // envelope — engines parse error bodies, not just status codes.

@@ -41,8 +41,7 @@ use meridian_store::maintenance::{JobState, JobType, PolicySpec, Scope};
 use meridian_store::{tenancy, warehouse};
 use parquet::arrow::{ArrowWriter, PARQUET_FIELD_ID_META_KEY};
 use serde_json::json;
-use sqlx::PgPool;
-use tokio::sync::{Mutex, MutexGuard, OnceCell};
+use sqlx::{Connection, PgConnection, PgPool};
 use ulid::Ulid;
 
 // ---------------------------------------------------------------------------
@@ -50,25 +49,46 @@ use ulid::Ulid;
 // ---------------------------------------------------------------------------
 
 /// The worker's `claim_next` and the reconciler both scan the maintenance
-/// queue / table set **globally** (a shared worker pool, by design). Cargo
-/// runs these tests concurrently against one database, so a foreign test's
-/// job could be claimed mid-test, or the global reconcile pass could pick up a
-/// concurrently-created table. This process-wide async mutex serializes them —
-/// the same discipline `meridian_store`'s queue tests use.
-static SERIAL: OnceCell<Mutex<()>> = OnceCell::const_new();
+/// queue / table set **globally** (a shared worker pool, by design), and this
+/// binary resets the queue (`DELETE FROM maintenance_jobs`) at the start of
+/// each test. That same table is also driven by `meridian_store`'s
+/// `maintenance_db` queue tests in a *separate* test binary against one
+/// database. A `static` mutex only serializes tests within this process; it
+/// cannot see the other binary, so a sibling's reset could delete this test's
+/// rows (or its claim grab this test's job) mid-flight. A Postgres advisory
+/// lock serializes process-to-process. Every maintenance test here — and every
+/// queue test in `maintenance_db` — takes this lock, exactly like the
+/// outbox-relay tests.
+///
+/// Advisory lock key shared by all maintenance-queue tests across test
+/// binaries (ASCII "MAINTQUE" packed into an i64; must match the key in
+/// `meridian-store/tests/maintenance_db.rs`).
+const QUEUE_TEST_LOCK_KEY: i64 = 0x4D41_494E_5451_5545;
 
-async fn serial_lock() -> MutexGuard<'static, ()> {
-    SERIAL
-        .get_or_init(|| async { Mutex::new(()) })
+/// Takes the cross-binary maintenance-queue test lock on a dedicated
+/// (non-pooled) connection; the lock releases when the returned connection
+/// drops at end of test. Serializes maintenance tests within this binary and
+/// against the store crate's `maintenance_db` queue tests.
+async fn queue_test_lock() -> PgConnection {
+    // `ctx()` has already confirmed DATABASE_URL is set before any caller
+    // reaches here.
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL set");
+    let mut conn = PgConnection::connect(&url)
         .await
-        .lock()
+        .expect("connect for advisory lock");
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(QUEUE_TEST_LOCK_KEY)
+        .execute(&mut conn)
         .await
+        .expect("take maintenance queue test lock");
+    conn
 }
 
 /// Clears the shared maintenance queue and reconcile-debounce state so a test
-/// claims/enqueues only its own jobs. Safe because [`serial_lock`] guarantees
-/// no sibling maintenance test in this binary runs concurrently. Per-table
-/// assertions already isolate cross-binary noise.
+/// claims/enqueues only its own jobs. Safe because [`queue_test_lock`]
+/// guarantees no sibling maintenance test — in this binary or the store crate's
+/// queue tests — runs concurrently. Per-table assertions already isolate
+/// cross-binary noise.
 async fn reset_queue(pool: &PgPool) {
     sqlx::query("DELETE FROM maintenance_jobs")
         .execute(pool)
@@ -481,7 +501,7 @@ async fn live_data_file_count(ctx: &Ctx, table_id: &str) -> usize {
 #[tokio::test]
 async fn worker_runs_and_commits_a_compaction_end_to_end() {
     let Some(ctx) = ctx().await else { return };
-    let _serial = serial_lock().await;
+    let _lock = queue_test_lock().await;
     reset_queue(&ctx.pool).await;
     let ns = format!("maint_ns_{}", Ulid::new().to_string().to_lowercase());
     let table_location = format!("{}/{ns}/orders", ctx.warehouse_root);
@@ -576,7 +596,7 @@ async fn worker_runs_and_commits_a_compaction_end_to_end() {
 #[tokio::test]
 async fn second_compaction_is_a_noop() {
     let Some(ctx) = ctx().await else { return };
-    let _serial = serial_lock().await;
+    let _lock = queue_test_lock().await;
     reset_queue(&ctx.pool).await;
     let ns = format!("maint_ns_{}", Ulid::new().to_string().to_lowercase());
     let table_location = format!("{}/{ns}/orders", ctx.warehouse_root);
@@ -644,7 +664,7 @@ async fn second_compaction_is_a_noop() {
 #[tokio::test]
 async fn reconciler_enqueues_for_unhealthy_table_and_debounces() {
     let Some(ctx) = ctx().await else { return };
-    let _serial = serial_lock().await;
+    let _lock = queue_test_lock().await;
     reset_queue(&ctx.pool).await;
     let ns = format!("maint_ns_{}", Ulid::new().to_string().to_lowercase());
     let table_location = format!("{}/{ns}/orders", ctx.warehouse_root);
@@ -725,7 +745,7 @@ async fn reconciler_enqueues_for_unhealthy_table_and_debounces() {
 #[tokio::test]
 async fn reconciler_skips_actively_committing_table() {
     let Some(ctx) = ctx().await else { return };
-    let _serial = serial_lock().await;
+    let _lock = queue_test_lock().await;
     reset_queue(&ctx.pool).await;
     let ns = format!("maint_ns_{}", Ulid::new().to_string().to_lowercase());
     let table_location = format!("{}/{ns}/stream", ctx.warehouse_root);
@@ -793,7 +813,7 @@ async fn reconciler_skips_actively_committing_table() {
 #[tokio::test]
 async fn expiry_respects_refs_and_retention() {
     let Some(ctx) = ctx().await else { return };
-    let _serial = serial_lock().await;
+    let _lock = queue_test_lock().await;
     reset_queue(&ctx.pool).await;
     let ns = format!("maint_ns_{}", Ulid::new().to_string().to_lowercase());
     let table_location = format!("{}/{ns}/history", ctx.warehouse_root);
@@ -932,7 +952,7 @@ async fn expiry_respects_refs_and_retention() {
 #[tokio::test]
 async fn unsupported_job_type_fails_cleanly() {
     let Some(ctx) = ctx().await else { return };
-    let _serial = serial_lock().await;
+    let _lock = queue_test_lock().await;
     reset_queue(&ctx.pool).await;
     let ns = format!("maint_ns_{}", Ulid::new().to_string().to_lowercase());
     let table_location = format!("{}/{ns}/orders", ctx.warehouse_root);

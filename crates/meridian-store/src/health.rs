@@ -17,7 +17,7 @@
 //!   manifest;
 //! - partition skew: the coefficient of variation of bytes-per-partition.
 //!
-//! From the write-through index ([`table_snapshots`], the `tables` row) and
+//! From the write-through index (`table_snapshots`, the `tables` row) and
 //! the metadata file itself:
 //!
 //! - snapshot count and age of the oldest retained snapshot (bloat);
@@ -35,7 +35,7 @@
 //!
 //! # Persistence
 //!
-//! [`compute_health`] appends one immutable [`health_snapshots`] row per
+//! [`compute_health`] appends one immutable `health_snapshots` row per
 //! computation so the UI/API can chart a table's health over time and a
 //! recommendation can cite the exact inputs that produced it.
 //!
@@ -673,7 +673,7 @@ pub struct HealthSnapshotRecord {
     pub computed_at: DateTime<Utc>,
 }
 
-/// Computes a table's health and appends a [`health_snapshots`] row,
+/// Computes a table's health and appends a `health_snapshots` row,
 /// returning the persisted record.
 ///
 /// This reads only metadata (index + manifest Avro), never data. The write

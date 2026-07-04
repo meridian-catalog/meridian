@@ -65,7 +65,7 @@ piece is missing · **Not yet** — returns 404/405.
 | `createNamespace` | `POST /v1/{prefix}/namespaces` | Implemented | Multi-level namespaces and initial properties. |
 | `loadNamespaceMetadata` | `GET /v1/{prefix}/namespaces/{ns}` | Implemented | |
 | `namespaceExists` | `HEAD /v1/{prefix}/namespaces/{ns}` | Implemented | 204 / 404. |
-| `dropNamespace` | `DELETE /v1/{prefix}/namespaces/{ns}` | Implemented | Only empty namespaces (no child namespaces or tables); otherwise 409 `NamespaceNotEmptyError`. |
+| `dropNamespace` | `DELETE /v1/{prefix}/namespaces/{ns}` | Implemented | Only empty namespaces (no child namespaces, tables, or views); otherwise 409 `NamespaceNotEmptyError`. |
 | `updateProperties` | `POST /v1/{prefix}/namespaces/{ns}/properties` | Implemented | Atomic set + remove; a key in both `updates` and `removals` → 422. |
 
 ### Tables
@@ -117,7 +117,7 @@ answer 406 and are not advertised in `GET /v1/config`).
 | `listViews` | `GET .../namespaces/{ns}/views` | Implemented | RBAC: `LIST_TABLES` on the namespace. Pagination: see divergence (a). |
 | `createView` | `POST .../namespaces/{ns}/views` | Implemented | RBAC: `CREATE_VIEW` on the namespace. Multiple SQL representations per version (at most one per dialect, case-insensitive). 409 when the name exists as a view **or a table**: see divergence (g). Default location is uuid-suffixed under the namespace path, like tables. Request field ids are treated as provisional, exactly as on `createTable`: fresh 1-based ids are assigned server-side. Spark 3.5's `CREATE VIEW` numbers the output schema from 0 and used to be rejected with `field id 0 is not positive`; covered by the [Spark smoke](../conformance/engines/spark/README.md). |
 | `loadView` | `GET .../views/{view}` | Implemented | RBAC: `READ` on the view. `config` carries the warehouse's non-secret storage options (see [Storage config passthrough](#storage-config-passthrough)). No `ETag`: the spec defines the `ETag`/`If-None-Match` mechanism for table responses only (`LoadViewResponse` has no `etag` header). The `referenced-by` parameter is accepted and ignored (the caller's own `READ` on the view decides access; chain-based decisions are not implemented). **Universal views (Pillar G, G-F1):** when the requesting engine's dialect is resolvable (explicit `?engine=<dialect>` override, else `User-Agent` inference for well-known engine clients; an unrecognized client gets the view as authored) and the view lacks a representation for that dialect, Meridian transpiles the canonical representation via the SQLGlot sidecar, folds the translated dialect-tagged representation into the served `metadata`'s current version carrying `meridian.transpile-status` (`verified`/`best_effort`/`unsupported`, validated by parse-back), reports it under a non-spec `meridian-transpile` response field, and caches it (side table, no pointer bump). A sidecar outage degrades to the canonical representation with a status note, never a 500. See [`docs/design/semantics.md`](design/semantics.md). |
-| `replaceView` | `POST .../views/{view}` | Implemented | RBAC: `COMMIT` on the view, checked before anything is staged. The view commit path: `assert-view-uuid` checked against current metadata, unknown update/requirement types → 400, updates applied through the validating view-metadata builder (version log grows per current-version change, versions expire per `version.history.num-entries`), bounded compare-and-swap retry (409 `CommitFailedException` after 3 lost races). **Missing:** `Idempotency-Key` is not honored on view endpoints (see [Idempotency keys](#idempotency-keys)); dialect-drop protection (`replace.drop-dialect.allowed`) is not enforced yet (builder TODO). **Known gap:** `add-schema` updates on the replace path validate field ids strictly (must be positive), but view schemas have no cross-version field-id continuity to protect and the Java reference accepts whatever ids the client sends — so Spark 3.5's `CREATE OR REPLACE VIEW` on an *existing* view fails with `field id 0 is not positive` (0-based ids, same shape as the resolved create-path bug). Reproduced by the [Spark smoke](../conformance/engines/spark/README.md#known-gap-create-or-replace-view); initial `CREATE VIEW` is unaffected. |
+| `replaceView` | `POST .../views/{view}` | Implemented | RBAC: `COMMIT` on the view, checked before anything is staged. The view commit path: `assert-view-uuid` checked against current metadata, unknown update/requirement types → 400, updates applied through the validating view-metadata builder (version log grows per current-version change, versions expire per `version.history.num-entries`), bounded compare-and-swap retry (409 `CommitFailedException` after 3 lost races). **Missing:** `Idempotency-Key` is not honored on view endpoints (see [Idempotency keys](#idempotency-keys)); dialect-drop protection (`replace.drop-dialect.allowed`) is not enforced yet (builder TODO). Request field ids on `add-schema` are treated as provisional, exactly as on `createView`: fresh 1-based ids are assigned server-side (and `identifier-field-ids` remapped), so Spark 3.5's `CREATE OR REPLACE VIEW` — which numbers the replacement schema from 0 just like `CREATE VIEW` — no longer fails with `field id 0 is not positive`. View schemas have no cross-version field-id continuity to protect, and this keeps create and replace consistent (the same statement yields the same ids whether or not the view existed). The view-metadata builder keeps its strict field-id validation for updates the server constructs itself. Covered by the [Spark smoke](../conformance/engines/spark/README.md#create-or-replace-view--provisional-field-ids-fixed-in-meridian). |
 | `dropView` | `DELETE .../views/{view}` | Implemented | RBAC: `DROP` on the view. 204; the spec defines no purge for views, so metadata files always remain in object storage. |
 | `viewExists` | `HEAD .../views/{view}` | Implemented | RBAC: `READ` on the view. 204 / 404. |
 | `renameView` | `POST /v1/{prefix}/views/rename` | Implemented | RBAC: `WRITE` on the source view **and** `CREATE_VIEW` on the destination namespace. Rename or move across namespaces within one warehouse; 409 when the destination exists as a view **or a table** (divergence (g)); 204. |
@@ -204,26 +204,32 @@ uses `NotAuthorizedException` but marks the field non-prescriptive;
 Meridian uses `ForbiddenException` (matching the reference Java client's
 403 mapping) so 401 `NotAuthorizedException` stays unambiguous.
 
-### (g) Tables and views share a namespace — enforced from the views side; two table-side gaps remain
+### (g) Tables and views share a namespace — enforced from both sides
 
 The spec's `createView`, `createTable`, `registerTable`, `renameView`, and
 `renameTable` all describe their 409 as "the identifier already exists as a
-**table or view**": one namespace has one name space for both. Meridian's
-decision is to implement that shared name space. Current enforcement:
+**table or view**": one namespace has one name space for both. Meridian
+implements that shared name space, enforced in both directions:
 
-- **Views side (complete):** `createView` and `renameView` return 409
+- **Views side:** `createView` and `renameView` return 409
   `AlreadyExistsException` when the requested identifier exists as a view
   *or as a table* (checked inside the create/rename transaction).
-- **Tables side (known gap, tracked):** `createTable`, `registerTable`, and
-  `renameTable` do not yet check the `views` table, so a table can currently
-  be created with the same name as an existing view (each remains loadable
-  through its own endpoint, but the identifier is ambiguous to engines).
-  Postgres cannot express a cross-table unique constraint, so this needs the
-  same application-level check on the table paths.
-- **Related known gap:** `dropNamespace` counts child namespaces and tables
-  but not views. A namespace whose only content is views is refused (the
-  foreign key blocks the delete — nothing is corrupted), but the failure
-  surfaces as a 500 instead of the correct 409 `NamespaceNotEmptyError`.
+- **Tables side:** `createTable`, `registerTable`, and `renameTable` return
+  409 `AlreadyExistsException` when the requested identifier exists as a
+  table *or as a view* (the mirror check against the `views` table, inside
+  the create/rename transaction).
+
+Postgres cannot express a cross-table unique constraint, so both directions
+are application-level checks inside the mutating transaction. A create or
+rename racing the opposite kind onto the same name can still interleave
+between the check and the commit (nothing backstops it at the database
+level) — a narrow, accepted window.
+
+`dropNamespace` participates in the same shared name space: it counts child
+namespaces, tables, **and** views, so a namespace whose only content is views
+is refused with the correct 409 `NamespaceNotEmptyError`. (Previously the
+check omitted views: the `ON DELETE RESTRICT` foreign key still blocked the
+delete — nothing was ever corrupted — but the failure surfaced as a 500.)
 
 ## Storage config passthrough
 
@@ -931,3 +937,150 @@ Full detail in [`docs/design/workbench.md`](design/workbench.md).
   generator; all real `/api/v2` data.
 - **Not yet**: external-engine routing for big scans; visualization / dashboards /
   scheduled digests (L-F2, explicitly not a BI suite).
+
+### AI Asset Governance (`/api/v2/assets`, `/api/v2/training-runs`, `/api/v2/models`, `/api/v2/deletion-campaigns`, Pillar I)
+
+The catalog governs the AI supply chain, not just tables. One extensible asset
+model plus immutable training-run provenance and GDPR deletion evidence. Full
+detail in [`docs/design/ai-assets.md`](design/ai-assets.md).
+
+- **Generic assets** (`/api/v2/assets`, I-F1): `POST` registers a **fileset**,
+  **model**, or **vector dataset** — one row with a `kind` and kind-specific
+  `metadata`. `GET /api/v2/assets` lists (filter `?type=`), `GET
+  /api/v2/assets/{id}` loads, `GET /api/v2/assets/search?q=` full-text searches
+  (name/tags/owner/description). Assets are a first-class **grant securable**
+  (`securable.type = "asset"`, addressed by id): the leaf-native privileges
+  (`READ`/`WRITE`/`DROP`) apply, admitted into the grants CHECK exactly as views
+  were. Create/delete are management-gated.
+- **Fileset credential vending** (`POST /api/v2/assets/{id}/credentials`, I-F1):
+  a fileset vends scoped, short-lived storage credentials **bound to its
+  prefix**, reusing the identical table-vend mechanics (STS/static per the
+  warehouse's `vending` option). Access follows RBAC on the asset securable
+  (`WRITE`→read-write, `READ`→read-only); every vend writes an
+  `audit.credential.vend` row + `credential.vended` event against `asset:{id}`.
+- **Training-run pinning** (`POST /api/v2/training-runs`, I-F2): binds a
+  `(model, model_version)` to the **exact table snapshots** that trained it —
+  `{ model, model_version, inputs: [{ table_ref, table_id?, snapshot_id }] }`.
+  The record is **immutable and append-only** (no update/delete path); the
+  pinned `snapshot_id`s are stored exactly, so an Iceberg time-travel read
+  reproduces the inputs. `GET /api/v2/training-runs/{id}` reads it back.
+- **Provenance + EU AI Act summary** (`/api/v2/models/{model}/...`, I-F3):
+  `.../provenance` assembles the per-model **data → run → model** chain, the
+  **license/consent tags that propagated** from the input sources (resolved from
+  the D-F3 tag model), and **auto-drafted dataset cards**.
+  `.../ai-act-summary` generates the **GPAI training-content summary**
+  deterministically from the pinned inputs + tags. Both management-gated.
+- **Deletion campaigns** (`/api/v2/deletion-campaigns`, I-F4): GDPR "right to be
+  forgotten" evidence. `POST` opens a campaign for an erasure subject;
+  `POST .../{id}/snapshots` adds affected snapshots and **freezes** which model
+  versions saw that data (from the training-run records); `GET .../{id}/evidence`
+  returns the durable evidence pack (affected snapshots + model exposure +
+  expiry status); `POST .../{id}/expire` records that an affected snapshot is
+  physically gone (the integration point the maintenance `ExpireSnapshots` job
+  calls) and closes the campaign when nothing is pending.
+- **CLI**: `meridian asset` (create/list/get/credentials), `meridian
+  training-run` (pin/get), `meridian provenance` (show/ai-act-summary),
+  `meridian deletion` (open/add-snapshots/evidence).
+- **Persistence**: migration `0023_ai_assets` (`assets`, `training_runs`,
+  `training_run_inputs`, `deletion_campaigns`, `deletion_campaign_snapshots`,
+  `deletion_campaign_model_exposure`).
+- **Honest scope**: the provenance chain's "model → agents using it" leg is
+  **not modelled yet** (no model→agent binding exists) and is returned as an
+  explicit empty section, never fabricated. The AI Act summary is a
+  catalog-derived **draft for a compliance officer, not a legal opinion**.
+  Physical snapshot expiry is performed by the maintenance `ExpireSnapshots`
+  job; this surface records the evidence and tracks expiry status (the tie-in is
+  an explicit endpoint, wiring the job to call it automatically is a follow-up).
+  Generic assets carry their own workspace-scoped full-text search rather than
+  joining the namespace-scoped table/view search UNION.
+
+### Sharing & marketplace (`/api/v2/shares`, `/api/v2/marketplace`, `/share/{token}`, Pillar J, J-F1/J-F2)
+
+Cross-org data sharing (J-F1) and the internal marketplace (J-F2). A **share**
+is a scoped, read-only projection of catalog assets to an external recipient
+org, served over a per-share Iceberg REST endpoint at `/share/{token}/v1/...`
+with **vended read-only credentials** (reusing `meridian-vending`) and an
+optional row/column policy per grant. The management API (`/api/v2/shares` +
+`/api/v2/shares/{id}/grants` + `.../revoke`) is management-gated; the
+recipient endpoint is authenticated by the share **token** in the path (exempt
+from the OIDC middleware — the token is the credential) and answers every write
+verb with `403` (a share is read-only by construction). The token is 256 bits
+of randomness, returned exactly once on create and never in any read or audit
+payload. **Prevented:** read-only access, column masking (masked columns are
+dropped from the served schema), and — because credentials are short-lived —
+instant-in-effect revocation. **Surfaced, not prevented:** the row filter (a
+vended-credential engine reads Parquet directly, so the catalog cannot
+interpose a WHERE clause; the filter rides the served `config` as
+`meridian.share.row-filter` and is audited). A terms-of-use gate blocks data
+until the recipient accepts. Every recipient access writes a
+`share.recipient.*` audit row. The **marketplace** (`/api/v2/marketplace`) is
+the certified-data-product gallery (Pillar G, certified-first) with a
+request-access flow that creates and decides Pillar-D `access_requests`. Works
+with any IRC-capable engine on the recipient side — the neutral alternative to
+Delta Sharing and Snowflake shares. **Out of scope (explicit):** external/public
+marketplace, clean-room compute, and row-level *prevention* over the neutral IRC
+endpoint. Full design: [docs/design/sharing.md](design/sharing.md).
+
+### Branching & Data CI/CD (`/api/v2/branches`, `/api/v2/tags`, `warehouse@branch`, Pillar K)
+
+Catalog-level branches & tags — "Nessie whitespace, governed." A **catalog
+branch** is a named overlay of the per-table pointer map (K-F1): it shares
+main's metadata until a table diverges (zero-copy), at which point a
+`branch_table_pointers` row carries the branch's own pointer, advanced by the
+**same CAS/outbox/audit discipline main uses** — there is exactly one function
+per pointer kind that moves it, and the commit invariants (no lost updates,
+crash-safe, idempotent, audit-durable) are preserved (proof:
+`docs/design/branching.md` §3, plus the concurrent branch+main and idempotency
+tests).
+
+The **wow is branch-as-catalog (K-F2)**: any branch is mountable as its own IRC
+catalog under the prefix `warehouse@branch` — the prefix resolver splits on the
+last `@`, resolves the base warehouse, and serves branch-scoped metadata.
+`GET /v1/config?warehouse=warehouse@dev` resolves and echoes the full
+`warehouse@dev` prefix back in `overrides.prefix`, so a client that bootstraps
+via `config` (PyIceberg does) wires the branch prefix into every subsequent
+call automatically. Namespaces and table *rows* are shared across branches
+(only the per-table metadata *pointer* diverges), so namespace/table resolution
+uses the base warehouse; the branch pointer is layered on at load/commit. So
+`loadTable` on `warehouse@dev` returns the branch pointer (or falls through to
+main for an undiverged table), and a commit on `warehouse@dev` writes the branch
+pointer and **never moves main**. A plain PyIceberg/Spark/Trino client reads and
+writes a branch with **no branching API** — it just points at a different
+catalog name. Proven end-to-end by the `branching_api` suite (a commit via the
+`warehouse@branch` HTTP prefix advances the branch and leaves main byte-for-byte
+unchanged; a main load returns the base, a branch load returns the divergence).
+
+Management API (all management-gated): `POST/GET /api/v2/branches`,
+`GET/DELETE /api/v2/branches/{name}`, `GET .../diff` (schema + snapshot +
+row-count deltas vs main; unknown row counts are reported as `unknown`, never
+fabricated), `GET .../gate` (the merge gate), `POST .../merge`,
+`POST /api/v2/branches/sweep` (delete expired ephemeral PR branches), and
+`POST/GET /api/v2/tags` + `DELETE /api/v2/tags/{name}` for immutable release
+points. **Merge** (K-F1) fast-forwards main table-by-table **through the commit
+path** (each table is an ordinary main CAS whose new metadata is the branch
+head), with **table-level conflict detection** (a table changed on both sides
+since divergence refuses the whole merge, fail-closed) and a **merge gate**
+(K-F3): Pillar-E contracts bound to the affected tables are evaluated against the
+branch head, and a block-mode violation refuses the merge before any pointer
+moves (reusing the circuit breaker's contract engine). **Tags** freeze a ref's
+resolved pointers (`catalog_tags`) and are read-only — a commit against a
+`warehouse@tag` prefix is refused `CommitFailedException`.
+
+CLI: `meridian branch create|list|diff|gate|merge|delete|sweep` and
+`meridian branch tag create|list|delete`. `meridian branch gate` exits non-zero
+when the gate fails — drop it into a dbt/SQLMesh CI job before merging.
+
+- **Persistence**: migration `0025_branching` (`catalog_branches`,
+  `branch_namespaces`, `branch_table_pointers`, `catalog_tags`).
+- **Honest scope (documented, `branching.md` §9)**: conflict detection is
+  **table-level** (both-sides changes conflict even on disjoint files; file-level
+  overlap analysis is future work — the conservative rule never silently
+  mis-merges). Branch-head snapshots are **not** in the search/health
+  write-through index (that tracks each table's main state); merging to main
+  indexes normally. The circuit breaker does **not** run on branch commits (a dev
+  branch may hold state that would not yet pass main's contracts) — contracts
+  gate the merge instead. RBAC/governance apply to branch reads/commits
+  identically to main (a branch is not an access escape hatch). Creating a table
+  only-on-a-branch is out of scope this milestone (branch commits target tables
+  that exist on main). Full design:
+  [docs/design/branching.md](design/branching.md).
