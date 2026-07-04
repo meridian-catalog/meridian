@@ -166,27 +166,67 @@ fn split_tags(
     (table_tags, column_tags)
 }
 
-/// Resolves the governance decision for a `(principal, table)` read, given the
-/// table's schema (for the column universe) and an optional declared purpose.
+/// The raw governance decision for one `(principal, table[, purpose])`: the
+/// allow/deny gate plus the *un-folded* [`Enforcement`] (row filters as their
+/// closed predicate AST, column masks with their exact kinds).
 ///
-/// This is the single entry point the scan planner (and the effective-policy
-/// API) calls. It:
+/// This is the primitive both enforcement surfaces build on. It differs from
+/// [`ScanPolicy`] in one deliberate way: it keeps the **full mask kind** per
+/// column (Null/Hash/Partial/Custom/Drop) rather than folding every mask to a
+/// removed column. The scan-plan path folds masks to removal (values can't be
+/// rewritten in a scan task); the small-scan **query** path (workbench, L-F1)
+/// can render a value-preserving mask in SQL and so wants the kind. The agent
+/// `run_sql` path (H-F2) then re-folds to drops via [`ScanPolicy`].
+#[derive(Debug, Clone)]
+pub struct QueryEnforcement {
+    /// Whether ABAC denies the read outright (RBAC already said yes).
+    pub denied: bool,
+    /// The resolved row filters + column masks for this principal (empty when
+    /// no policies apply). Consumed directly by `meridian_query::run`.
+    pub enforcement: Enforcement,
+    /// The ids of every policy that contributed, for the audit record. Sorted,
+    /// de-duplicated.
+    pub applied_policies: Vec<String>,
+    /// The human-readable decision reason from the ABAC engine.
+    pub reason: String,
+}
+
+impl QueryEnforcement {
+    /// The permissive result: nothing to enforce (no policies apply).
+    #[must_use]
+    pub fn allow_all() -> Self {
+        Self {
+            denied: false,
+            enforcement: Enforcement::none(),
+            applied_policies: Vec::new(),
+            reason: "no ABAC policies apply".to_owned(),
+        }
+    }
+}
+
+/// Resolves the raw governance decision for a `(principal, table)` read: the
+/// allow/deny gate and the un-folded [`Enforcement`] (row filters + column
+/// masks with their kinds).
+///
+/// This is the shared primitive. It:
 ///   1. resolves the principal's RBAC roles and the table's (and columns')
 ///      approved tags,
 ///   2. resolves every enabled policy that applies (directly or via a tag),
 ///   3. compiles the ABAC rules to Cedar and evaluates the allow/deny gate,
-///   4. resolves row filters + column masks, folding masks to column removal
-///      (see the module docs), and
-///   5. returns a [`ScanPolicy`] with the audit detail.
+///   4. resolves row filters + column masks (kinds preserved).
+///
+/// [`resolve_scan_policy`] wraps this and folds the result to the scan-plan
+/// shape (masks → removed columns, filter → [`Expression`]); the small-scan
+/// query executor consumes [`QueryEnforcement::enforcement`] directly.
 ///
 /// RBAC is assumed already checked by the caller (READ passed); this is the
 /// additive ABAC layer.
-pub async fn resolve_scan_policy(
+pub async fn resolve_query_enforcement(
     pool: &PgPool,
     principal: &Principal,
     table: &TableContext<'_>,
     purpose: Option<&str>,
-) -> Result<ScanPolicy, ApiError> {
+) -> Result<QueryEnforcement, ApiError> {
     let workspace_id = tenancy::default_workspace_id();
 
     // (1) The principal's roles (best-effort: an unprovisioned principal has
@@ -231,7 +271,7 @@ pub async fn resolve_scan_policy(
     )
     .await?;
     if applied.is_empty() {
-        return Ok(ScanPolicy::allow_all());
+        return Ok(QueryEnforcement::allow_all());
     }
 
     // Deserialize each applied policy's definition into an AbacRule (the
@@ -269,10 +309,9 @@ pub async fn resolve_scan_policy(
         })?;
 
     if decision.is_deny() {
-        return Ok(ScanPolicy {
+        return Ok(QueryEnforcement {
             denied: true,
-            row_filter: None,
-            removed_columns: Vec::new(),
+            enforcement: Enforcement::none(),
             applied_policies: dedup_sorted(policy_ids),
             reason: decision.reason,
         });
@@ -293,10 +332,48 @@ pub async fn resolve_scan_policy(
     let enforcement: Enforcement =
         resolve_filters_and_masks(&authz_principal, &resource, &columns, &abac_rules);
 
-    let row_filter = enforcement.row_predicate();
+    Ok(QueryEnforcement {
+        denied: false,
+        enforcement,
+        applied_policies: dedup_sorted(policy_ids),
+        reason: decision.reason,
+    })
+}
+
+/// Resolves the governance decision for a `(principal, table)` read, given the
+/// table's schema (for the column universe) and an optional declared purpose,
+/// folded into the shape the **scan planner** injects.
+///
+/// This is the single entry point the scan planner (and the effective-policy
+/// API) calls. It resolves the raw decision via [`resolve_query_enforcement`]
+/// and then folds it to the scan-plan shape: masks become **removed columns**
+/// (fail closed — a scan task returns bytes, not rewritten values, see the
+/// module docs) and the row filters fold into a single [`Expression`].
+///
+/// RBAC is assumed already checked by the caller (READ passed); this is the
+/// additive ABAC layer.
+pub async fn resolve_scan_policy(
+    pool: &PgPool,
+    principal: &Principal,
+    table: &TableContext<'_>,
+    purpose: Option<&str>,
+) -> Result<ScanPolicy, ApiError> {
+    let resolved = resolve_query_enforcement(pool, principal, table, purpose).await?;
+
+    if resolved.denied {
+        return Ok(ScanPolicy {
+            denied: true,
+            row_filter: None,
+            removed_columns: Vec::new(),
+            applied_policies: resolved.applied_policies,
+            reason: resolved.reason,
+        });
+    }
+
+    let row_filter = resolved.enforcement.row_predicate();
 
     // Every mask becomes column removal on the scan-plan path (fail closed).
-    let mut removed: Vec<String> = enforcement.masked_columns();
+    let mut removed: Vec<String> = resolved.enforcement.masked_columns();
     removed.sort();
     removed.dedup();
 
@@ -304,8 +381,8 @@ pub async fn resolve_scan_policy(
         denied: false,
         row_filter,
         removed_columns: removed,
-        applied_policies: dedup_sorted(policy_ids),
-        reason: decision.reason,
+        applied_policies: resolved.applied_policies,
+        reason: resolved.reason,
     })
 }
 
