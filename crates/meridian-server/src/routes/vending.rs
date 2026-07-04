@@ -136,21 +136,16 @@ pub(crate) struct VendContext<'a> {
     pub access: AccessMode,
 }
 
-/// Vends credentials for one table and records the vend (audit row +
-/// outbox event, one transaction) before returning them.
-///
-/// Returns `Ok(None)` when the warehouse has vending disabled — the caller
-/// decides whether that is a silent no-op (header path) or an error
-/// (`loadCredentials`).
-pub(crate) async fn vend_for_table(
-    state: &AppState,
+/// Builds the concrete [`Vendor`] and its ttl from a warehouse's parsed
+/// vending config and raw storage options. `Ok(None)` when vending is disabled
+/// (`VendingConfig::None`). Shared by the table vend and the fileset vend
+/// (Pillar I) so both go through exactly the same credential mechanics.
+pub(crate) fn build_vendor(
+    config: &VendingConfig,
+    options: &std::collections::BTreeMap<String, String>,
     principal: &Principal,
-    ctx: &VendContext<'_>,
-) -> Result<Option<VendedCredentials>, ApiError> {
-    let options = &ctx.warehouse.storage_config.0;
-    let config = VendingConfig::parse(options).map_err(|e| vending_config_error(&e))?;
-
-    let (vendor, ttl) = match &config {
+) -> Result<Option<(Vendor, Duration)>, ApiError> {
+    let built = match config {
         VendingConfig::None => return Ok(None),
         VendingConfig::Static => {
             let vendor = StaticVendor::new(
@@ -186,6 +181,26 @@ pub(crate) async fn vend_for_table(
             );
             (Vendor::Sts(vendor), *ttl)
         }
+    };
+    Ok(Some(built))
+}
+
+/// Vends credentials for one table and records the vend (audit row +
+/// outbox event, one transaction) before returning them.
+///
+/// Returns `Ok(None)` when the warehouse has vending disabled — the caller
+/// decides whether that is a silent no-op (header path) or an error
+/// (`loadCredentials`).
+pub(crate) async fn vend_for_table(
+    state: &AppState,
+    principal: &Principal,
+    ctx: &VendContext<'_>,
+) -> Result<Option<VendedCredentials>, ApiError> {
+    let options = &ctx.warehouse.storage_config.0;
+    let config = VendingConfig::parse(options).map_err(|e| vending_config_error(&e))?;
+
+    let Some((vendor, ttl)) = build_vendor(&config, options, principal)? else {
+        return Ok(None);
     };
 
     let scope =
@@ -263,6 +278,91 @@ async fn record_vend(
         .await
         .map_err(|e| MeridianError::internal("failed to commit vend audit", e))?;
     Ok(())
+}
+
+/// Vends credentials scoped to a **fileset** prefix (Pillar I, I-F1) and
+/// records the vend (audit row + outbox event, one transaction) before
+/// returning them. A fileset reuses the identical vend mechanics as a table:
+/// the same warehouse vending config, the same [`Vendor`], the same
+/// [`TableScope`] parse over its `s3://bucket/prefix` — the only difference is
+/// the audit resource is `asset:<id>`, not `table:<id>`.
+///
+/// `Ok(None)` when the fileset's warehouse has vending disabled.
+pub(crate) async fn vend_for_fileset(
+    state: &AppState,
+    principal: &Principal,
+    warehouse: &WarehouseRecord,
+    asset_id: &str,
+    fileset_name: &str,
+    storage_prefix: &str,
+    access: AccessMode,
+) -> Result<Option<VendedCredentials>, ApiError> {
+    let options = &warehouse.storage_config.0;
+    let config = VendingConfig::parse(options).map_err(|e| vending_config_error(&e))?;
+
+    let Some((vendor, ttl)) = build_vendor(&config, options, principal)? else {
+        return Ok(None);
+    };
+
+    let scope =
+        TableScope::from_s3_location(storage_prefix).map_err(|e| vending_error_to_api(&e))?;
+    let mut vended = vendor
+        .vend(&scope, access, ttl)
+        .await
+        .map_err(|e| vending_error_to_api(&e))?;
+
+    if let Some(endpoint) = options
+        .get("endpoint.external")
+        .or_else(|| options.get("endpoint"))
+    {
+        vended
+            .config
+            .insert("s3.endpoint".to_owned(), endpoint.clone());
+    }
+
+    // Record the vend against the asset resource, mirroring `record_vend`.
+    let workspace_id = tenancy::default_workspace_id();
+    let details = json!({
+        "warehouse": warehouse.name,
+        "fileset": fileset_name,
+        "asset_id": asset_id,
+        "prefix": vended.prefix,
+        "access": access.as_str(),
+        "mode": config.mode_str(),
+        "ttl_secs": ttl.as_secs(),
+        "expires_at": vended.expires_at.map(|t| t.to_rfc3339()),
+    });
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .map_err(|e| MeridianError::internal("failed to begin fileset vend audit", e))?;
+    outbox::enqueue(
+        &mut *tx,
+        &meridian_store::outbox::NewOutboxEvent {
+            workspace_id: Some(workspace_id),
+            aggregate: format!("asset:{asset_id}"),
+            event_type: "credential.vended".to_owned(),
+            payload: details.clone(),
+        },
+    )
+    .await?;
+    audit::append_in_tx(
+        &mut tx,
+        audit::NewAuditEntry {
+            workspace_id: Some(workspace_id),
+            principal: principal.audit_string(),
+            action: "credential.vend".to_owned(),
+            resource: format!("asset:{asset_id}"),
+            details,
+        },
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|e| MeridianError::internal("failed to commit fileset vend audit", e))?;
+
+    Ok(Some(vended))
 }
 
 /// The spec's `StorageCredential` shape.
