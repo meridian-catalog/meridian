@@ -9,6 +9,7 @@ members = [
     "crates/meridian-vending",
     "crates/meridian-executor",
     "crates/meridian-federation",
+    "crates/meridian-lineage",
     "crates/meridian-server",
     "crates/meridian-cli",
     "testing/bench",
@@ -31,6 +32,7 @@ meridian-storage = { path = "crates/meridian-storage" }
 meridian-vending = { path = "crates/meridian-vending" }
 meridian-executor = { path = "crates/meridian-executor" }
 meridian-federation = { path = "crates/meridian-federation" }
+meridian-lineage = { path = "crates/meridian-lineage" }
 meridian-server = { path = "crates/meridian-server" }
 
 # Async runtime

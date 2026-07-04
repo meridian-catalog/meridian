@@ -1,0 +1,30 @@
+[package]
+name = "meridian-lineage"
+description = "Lineage core for Meridian (Pillar F): commit-native table lineage (F-F1), the OpenLineage sink + emitter (F-F2), and impact analysis over the lineage graph (F-F5). Never fabricates cartesian edges — unknown stays unknown."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+meridian-common = { workspace = true }
+meridian-store = { workspace = true }
+
+chrono = { workspace = true }
+# The OpenLineage emitter POSTs RunEvents to a configured collector URL
+# (rustls, no system OpenSSL), matching the rest of the workspace.
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+ulid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true

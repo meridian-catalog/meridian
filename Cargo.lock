@@ -2577,6 +2577,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "meridian-lineage"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "meridian-common",
+ "meridian-store",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "ulid",
+]
+
+[[package]]
 name = "meridian-server"
 version = "0.1.0"
 dependencies = [
@@ -2596,6 +2613,7 @@ dependencies = [
  "meridian-executor",
  "meridian-federation",
  "meridian-iceberg",
+ "meridian-lineage",
  "meridian-storage",
  "meridian-store",
  "meridian-vending",
