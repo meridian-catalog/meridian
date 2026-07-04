@@ -1,0 +1,74 @@
+[package]
+name = "meridian-query"
+description = "Meridian's small-scan query executor: a DataFusion-backed engine that runs governed SELECTs over Iceberg tables the catalog owns, with row/column policy enforcement, an up-front scanned-bytes cap, and provenance (tables + snapshot ids) so agents can cite (Pillar H run_sql / Pillar L workbench)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Iceberg metadata model + manifest Avro reader: resolve a table's current
+# snapshot and enumerate its live data files.
+meridian-iceberg = { workspace = true }
+# Object storage: read Parquet data-file bytes.
+meridian-storage = { workspace = true }
+# Resolved row-filter predicates + column masks (Pillar D). The caller resolves
+# these for a (principal, table) pair and hands them to us; we compile them into
+# a governed view so run_sql is enforced by the same machinery as scan planning.
+meridian-authz = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+bytes = "1.10"
+futures = "0.3"
+
+# DataFusion: the embedded, small-scan-only query engine (spec §8.1, C-F4 tier 1,
+# H-F3, L-F1). Pinned lean: `sql` for the planner/executor, the expression
+# feature groups the governed-view masks need (crypto for sha256 hashing,
+# unicode for SUBSTR partial masks, string/regex/nested/datetime for general
+# SELECTs). Deliberately WITHOUT DataFusion's own `parquet`/`avro`/`compression`
+# file readers: we read Iceberg data files ourselves (via the `parquet` crate,
+# mapping columns by Iceberg field id, exactly as meridian-executor does) and
+# feed DataFusion in-memory Arrow batches. See ADR 010 for why DataFusion here
+# (and why it brings a second arrow/parquet major internal to this crate).
+datafusion = { version = "54", default-features = false, features = [
+    "sql",
+    "crypto_expressions",
+    "unicode_expressions",
+    "string_expressions",
+    "regex_expressions",
+    "nested_expressions",
+    "datetime_expressions",
+] }
+# Read/serialize Arrow: the `parquet` reader for Iceberg data files and the JSON
+# writer for the Arrow-batch -> JSON-rows result. Pinned to DataFusion 54's
+# arrow/parquet major (58) so the in-memory types line up; this arrow is an
+# internal implementation detail and never crosses the crate's public API.
+arrow-array = { version = "58", default-features = false }
+arrow-schema = { version = "58", default-features = false }
+arrow-json = { version = "58", default-features = false }
+arrow-select = { version = "58", default-features = false }
+arrow-cast = { version = "58", default-features = false }
+parquet = { version = "58", default-features = false, features = ["arrow", "snap", "zstd"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
+# Tests build real Iceberg fixtures (Parquet + manifest Avro) with the same
+# writers meridian-executor's tests use, so the executor exercises the real
+# read path.
+meridian-iceberg = { workspace = true }
+meridian-authz = { workspace = true }
+async-trait = { workspace = true }
+bytes = "1.10"
+uuid = { workspace = true }
+serde_json = { workspace = true }
+arrow-array = { version = "58", default-features = false }
+arrow-schema = { version = "58", default-features = false }
+parquet = { version = "58", default-features = false, features = ["arrow", "zstd"] }
+
+[lints]
+workspace = true

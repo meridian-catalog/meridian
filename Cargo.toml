@@ -10,6 +10,8 @@ members = [
     "crates/meridian-executor",
     "crates/meridian-federation",
     "crates/meridian-lineage",
+    "crates/meridian-query",
+    "crates/meridian-agents",
     "crates/meridian-server",
     "crates/meridian-cli",
     "testing/bench",
@@ -33,6 +35,8 @@ meridian-vending = { path = "crates/meridian-vending" }
 meridian-executor = { path = "crates/meridian-executor" }
 meridian-federation = { path = "crates/meridian-federation" }
 meridian-lineage = { path = "crates/meridian-lineage" }
+meridian-query = { path = "crates/meridian-query" }
+meridian-agents = { path = "crates/meridian-agents" }
 meridian-server = { path = "crates/meridian-server" }
 
 # Async runtime
@@ -114,6 +118,11 @@ apache-avro = { version = "0.21", features = ["snappy", "zstandard"] }
 sha2 = "0.10"
 hex = "0.4"
 hmac = "0.12"
+
+# Object-safe async traits (dyn dispatch over async methods): the agent
+# gateway's QueryExecutor is held as `dyn` so wave 2 can plug the DataFusion
+# executor in without the gateway depending on it.
+async-trait = "0.1"
 
 # Testing (dev-dependencies only)
 proptest = "1.7"
