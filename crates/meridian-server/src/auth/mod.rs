@@ -59,6 +59,15 @@ const ALLOWED_ALGORITHMS: &[Algorithm] = &[
 /// while the IdP is down or unconfigured.
 const OPEN_PATHS: &[&str] = &["/healthz", "/readyz"];
 
+/// Path prefix for the recipient-facing data-sharing endpoint (Pillar J,
+/// J-F1). These requests are authenticated by the share **token** in the URL
+/// (an external recipient org holds no Meridian OIDC identity), not by the
+/// bearer-JWT middleware — so the middleware passes them through and
+/// `routes::shares` resolves the share by its token and constructs a synthetic
+/// recipient principal itself. The token is a high-entropy bearer secret; a
+/// bad or revoked token gets a clean 401/403 from the handler.
+const SHARE_PREFIX: &str = "/share/";
+
 /// Timeout for JWKS/discovery requests to the IdP.
 const IDP_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -158,7 +167,11 @@ pub(crate) async fn authenticate(
     mut request: Request,
     next: Next,
 ) -> Response {
-    if OPEN_PATHS.contains(&request.uri().path()) {
+    let path = request.uri().path();
+    if OPEN_PATHS.contains(&path) || path.starts_with(SHARE_PREFIX) {
+        // Health probes and the token-authenticated recipient-sharing endpoint
+        // bypass the OIDC middleware. The share endpoint does its own
+        // token-based authentication in `routes::shares`.
         return next.run(request).await;
     }
 
