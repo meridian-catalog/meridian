@@ -1,67 +1,94 @@
 # Meridian
 
-**The agentic Iceberg REST Catalog** — an open-source, Apache Iceberg-native catalog with operations built in.
+**The agentic Iceberg REST Catalog** — an open-source, Apache Iceberg-native catalog with operations, governance, observability, semantics, and agent access built *in*.
 
 > **Note on the name:** "Meridian" is a working name and may change before the first public release.
 
-Meridian implements the [Apache Iceberg](https://iceberg.apache.org/) REST Catalog (IRC) specification as a drop-in catalog for any IRC-compatible engine, and builds the operational layers that usually live *around* a catalog directly *into* it:
-
-- **Autonomous table maintenance** — compaction, snapshot expiration, orphan-file cleanup, driven by the catalog itself
-- **Cross-engine access governance** — one policy layer enforced consistently regardless of which engine reads the table
-- **Data observability and contracts** — table health, freshness, and schema/contract checks at the catalog boundary
-- **Engine-agnostic semantic layer** — shared metric and model definitions, transpiled to each engine's SQL dialect
-- **Governed MCP gateway** — a controlled way for AI agents to discover and query governed data
+Meridian implements the [Apache Iceberg](https://iceberg.apache.org/) REST Catalog (IRC) specification as a drop-in catalog for any IRC-compatible engine — Spark, Trino, Flink, DuckDB, PyIceberg — and builds the operational layers that usually live *around* a catalog directly *into* it. It runs today: point a real engine at it and it works.
 
 ## Why
 
-Most data catalogs today are bare metadata stores: they track table pointers and schemas, and stop there. Everything a real deployment needs on top — maintenance jobs, access policies, quality monitoring, semantic definitions, agent access — gets bolted on as separate tools, each with its own view of the data and its own engine-specific integration.
+Most data catalogs are bare metadata stores: they track table pointers and schemas, and stop there. Everything a real deployment needs on top — maintenance jobs, access policies, quality monitoring, semantic definitions, agent access — gets bolted on as separate tools, each with its own view of the data and its own engine-specific integration.
 
 The catalog is the one component every engine already talks to. Meridian's premise is that these operational concerns belong in the catalog itself, implemented once, engine-neutrally — so they work the same whether the table is read by Spark, Trino, Flink, DuckDB, or an AI agent.
 
+## What it does
+
+Every capability below is implemented and covered by tests. See [`docs/status.md`](docs/status.md) for the honest, per-feature status (Implemented / Partial / Not yet) and [`docs/api-status.md`](docs/api-status.md) for the endpoint-level IRC surface.
+
+- **Core catalog (IRC++)** — the full REST catalog surface (namespaces, tables, views, multi-table transactions) on an atomic, crash-safe commit path with optimistic concurrency and idempotency keys; OIDC authentication; deny-by-default RBAC; a hash-chained, tamper-evident audit log. Exercised by PyIceberg, DuckDB, Flink, Spark, and Trino.
+- **Federation** — mirror external Iceberg REST catalogs (and AWS Glue) as read-only foreign assets, with a sprawl dashboard across every catalog you own.
+- **Autonomous table maintenance** — a health model and a built-in compaction engine that rewrites small files into large ones through the normal commit path (audited and revertible), snapshot expiry, and a savings ledger. Compaction preserves every row — verified end-to-end through both PyIceberg and DuckDB, including time travel.
+- **Cross-engine access governance** — row filters, column masks, and Cedar ABAC defined once and enforced inside server-side scan planning: restricted columns are *absent* from the plan and row filters are injected as residuals, so a thin client cannot see what it may not.
+- **Observability & data contracts** — zero-scan monitors (freshness, volume, schema drift) computed from the commit stream, plus **the circuit breaker**: a data contract can *reject a bad commit atomically at write time*, quarantine it to an audit branch, or warn — the fire doesn't start, rather than an alarm after it lands.
+- **Lineage & impact** — commit-native table lineage, an OpenLineage sink and emitter, and impact analysis with a CI gate (unknown lineage stays unknown — no fabricated edges).
+- **Semantics & universal views** — author a view once and every engine reads it in its own SQL dialect (deterministic SQLGlot transpilation with truthful `verified` / `best-effort` / `unsupported` labels), plus metrics, a business glossary, and certified data products.
+- **Governed agent gateway (MCP)** — AI agents are first-class principals with a purpose, budget, kill switch, and a full audit chain; governed context tools return masked columns *absent* so prompts can't leak restricted schema, and query tools run through the same policy machinery.
+- **AI asset governance** — filesets and a model registry, plus training-run pinning that binds a model version to exact table snapshots (reproducible via time travel).
+- **Sharing** — read-only cross-org shares served at a per-share IRC endpoint that exposes only granted assets, with instant revocation — a neutral alternative to Delta Sharing, built from vending + policy + audit.
+- **Branching & data CI/CD** — catalog-level branches and tags with **branch-as-catalog**: any branch mounts as `warehouse@branch`, so *any* IRC engine reads and writes it without knowing branching exists; merges are gated by contracts.
+- **SQL workbench** — a governed SQL editor over a built-in small-scan executor, plus a **web console** (Next.js) for the catalog, governance, quality, lineage, and agents, and a **Terraform provider** and `meridian apply` catalog-as-code.
+
 ## Status
 
-> **Pre-alpha / early development.**
+> **Early / alpha — usable, not yet production-hardened.**
 >
-> Meridian is **not yet usable**. It is under active initial development:
+> Meridian works today and you can run it against real engines (see [Quick start](#quick-start)). But it is young:
 >
-> - The core Iceberg REST catalog surface exists: config, namespaces, the table lifecycle (create, load with ETags, list, rename, register, drop) including the transactional commit path (single-table commits and multi-table transactions, with idempotency keys), the view lifecycle, OIDC authentication, and deny-by-default RBAC (auth is **off by default**). Credential vending exists for S3-compatible storage (STS session credentials scoped to one table's prefix, verified against MinIO — not yet cloud-verified against real AWS; GCS/Azure not implemented). Background maintenance does not exist yet
-> - [docs/api-status.md](docs/api-status.md) is the source of truth for what works: every REST endpoint's status (implemented / partial / not yet) and the documented divergences from the spec
-> - Real clients run against it: pyiceberg and DuckDB pass the [e2e suite](conformance/e2e/), and Flink 1.20, Spark 3.5, and Trino 482 smoke suites pass — including Spark merge-on-read `MERGE`/`DELETE` read back correctly by Trino — see the [engine conformance matrix](conformance/engines/README.md) for honest per-engine status and the documented gaps (e.g. Spark `CREATE OR REPLACE VIEW`, Trino schema creation needs an explicit `location`)
-> - First catalog-plane latency numbers against Apache Polaris and Lakekeeper are in [docs/benchmarks/](docs/benchmarks/) — local development benchmarks on a laptop, not cloud or production performance claims
-> - APIs, schemas, and configuration formats are unstable and will change without notice
-> - There are no releases and no compatibility guarantees
-> - **Do not run this in production** (or anywhere near data you care about)
->
-> Watch the repository if you want to follow progress.
+> - "Implemented" means demonstrated on a developer machine against local Postgres, MinIO, and the engines in the [conformance matrix](conformance/engines/README.md) — **not** cloud-verified, load-tested, or run in production.
+> - **Authentication is off by default** (`auth.mode = "disabled"`) for the dev loop — with it off, anyone who can reach the port owns the catalog. Turn on OIDC (and with it deny-by-default RBAC) before exposing it to anyone.
+> - Known gaps are listed honestly in [`docs/status.md`](docs/status.md): the Iceberg REST compatibility kit (RCK) has not been run yet; cloud credential vending for GCS/Azure is stubbed and AWS STS is MinIO-verified but not AWS-cloud-verified; column-level lineage from SQL parsing, classification scanners, and SCIM are follow-ups.
+> - APIs, schemas, and configuration formats are unstable and will change without notice. There are no releases and no compatibility guarantees.
+> - **Do not run this in production** or near data you cannot lose.
 
-## Planned architecture
+## Quick start
 
-- **Rust core** — single service built on axum, sqlx, and tokio; serves the IRC API and hosts the maintenance, governance, and observability layers
-- **PostgreSQL as the only required dependency** — all catalog state lives in Postgres; no queue, cache, or coordination service required
-- **Single-binary deploy target** — one process to run for a working catalog
-- **Python transpilation sidecar** — optional SQLGlot-based service for cross-dialect SQL transpilation used by the semantic layer
-- **Web console** — Next.js/TypeScript UI for administration, governance, and observability
+Everything in Docker (Postgres + the Meridian server; migrations run on startup):
 
-## Roadmap (high level)
+```sh
+docker compose -f docker-compose.dev.yml up --build
 
-Rough order of development:
+curl -s localhost:8181/healthz
+# {"status":"ok","checks":{"database":"ok"}}
+```
 
-1. Core Iceberg REST Catalog protocol (correctness and engine compatibility first)
-2. Table maintenance automation
-3. Access governance
-4. Observability and data contracts
-5. Semantic layer
-6. Governed MCP gateway for agents
+Create a warehouse (the IRC `{prefix}`) and point any Iceberg engine at it:
 
-Details will move into GitHub issues and milestones as the project opens up.
+```sh
+curl -s -X POST localhost:8181/api/v2/warehouses \
+  -H 'content-type: application/json' \
+  -d '{"name":"demo","storage_root":"file:///tmp/meridian-demo"}'
+```
+
+Then, from PyIceberg:
+
+```python
+from pyiceberg.catalog.rest import RestCatalog
+
+cat = RestCatalog("demo", uri="http://localhost:8181/iceberg", warehouse="demo")
+cat.create_namespace("analytics")
+# create tables, append data, time-travel, evolve schema — it's a normal IRC catalog
+```
+
+Running from source, the web console, engine examples (Spark/Trino/Flink/DuckDB), and the S3/MinIO setup are all in [docs/dev.md](docs/dev.md) and [conformance/](conformance/). First catalog-plane latency numbers against Apache Polaris and Lakekeeper are in [docs/benchmarks/](docs/benchmarks/) — local-laptop numbers, not cloud or production claims.
+
+## Architecture
+
+- **Rust core** — a single service (axum, sqlx, tokio) serving the IRC and management APIs and hosting the maintenance, governance, observability, semantics, and agent layers.
+- **PostgreSQL is the only required dependency** — all catalog state lives in Postgres; no queue, cache, or coordination service required. Object storage is the customer's (S3/GCS/Azure/MinIO/local).
+- **Single-binary deploy target** — one process for a working catalog.
+- **Python transpilation sidecar** — an optional SQLGlot service for cross-dialect SQL (universal views, metric compilation), with an off-by-default, BYO-key LLM-assist fallback whose output is always validated and labeled best-effort.
+- **Web console** — a Next.js/TypeScript UI for administration, governance, quality, lineage, and agents.
+
+The codebase is a Cargo workspace (catalog core, storage IO, the Iceberg metadata/manifest engine, vending, authz, federation, lineage, agents, and a small-scan query executor), a Python sidecar, the console, a Terraform provider, and an engine conformance harness. Significant decisions are recorded in [docs/adr/](docs/adr/).
 
 ## Development
 
-To build and run Meridian locally (Rust toolchain, Dockerized Postgres, tests, lints), see [docs/dev.md](docs/dev.md). Project conventions — commit style, ADRs, code standards — are in [CONTRIBUTING.md](CONTRIBUTING.md). Significant design decisions are recorded in [docs/adr/](docs/adr/).
+To build and run locally (Rust toolchain, Dockerized Postgres, tests, lints), see [docs/dev.md](docs/dev.md). Conventions — commit style, ADRs, code standards — are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Contributing
 
-The project is not yet ready for external contributions — the foundations are still moving too fast for that to be productive. See [CONTRIBUTING.md](CONTRIBUTING.md) for the conventions the project follows and for how this will open up.
+The project is still moving fast and pre-1.0. See [CONTRIBUTING.md](CONTRIBUTING.md) for the conventions it follows and for how contribution will open up.
 
 Security reports: please use GitHub private vulnerability reporting for this repository. (A dedicated security contact is TBD.)
 
