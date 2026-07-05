@@ -10,10 +10,11 @@ pillar-level view; where the two disagree, the more conservative wins.
 works but a stated piece is missing · **Not yet**: not built.
 
 > This is a pre-1.0 project under active development. "Implemented" means
-> demonstrated on a developer machine (local Postgres, MinIO, and the engines
-> in the conformance suite) — not that it has been hardened, cloud-verified, or
-> run in production. Cloud-only paths and the conformance-kit run are called out
-> explicitly below.
+> demonstrated against the engines in the conformance suite, both locally
+> (Postgres + MinIO) and on a cloud deployment (managed PostgreSQL + S3) — not
+> that it has been hardened or load-tested at scale. Paths that are genuinely
+> unbuilt (e.g. GCS/Azure vending) and the not-yet-run conformance kit are
+> called out explicitly below.
 
 ## Pillars
 
@@ -22,9 +23,10 @@ works but a stated piece is missing · **Not yet**: not built.
   commit path (single- and multi-table, property/chaos tested); events
   (CloudEvents feed, durable consumers, HMAC webhooks); OIDC auth; RBAC;
   hash-chained audit log with `/verify`; ETags.
-- **Partial**: credential vending (AWS STS + static, verified against MinIO —
-  **not** cloud-verified against real AWS); remote signing (S3, MinIO-verified);
-  scan planning (point-in-time only, no incremental); search (Postgres FTS, no
+- **Partial**: credential vending (AWS STS + static, verified against MinIO and
+  on real AWS S3; GCS/Azure not built); remote signing (S3, verified against
+  MinIO and AWS); scan planning (point-in-time only, no incremental); search
+  (Postgres FTS, no
   semantic/pgvector or usage ranking); tenancy (single-workspace default);
   `register` (rejects `overwrite:true` and UUID-alias adoption); CLI + Terraform
   + catalog-as-code.
@@ -140,8 +142,9 @@ works but a stated piece is missing · **Not yet**: not built.
 - The **Iceberg REST compatibility kit (RCK)** has not been run against Meridian
   yet; conformance today rests on the engine matrix (PyIceberg, DuckDB, Flink,
   Spark, Trino) and the endpoint checks in `api-status.md`.
-- **Cloud vending** for GCS and Azure is stubbed (returns an honest error); AWS
-  STS and remote signing are verified against MinIO, not real AWS.
+- **Credential vending / remote signing** for GCS and Azure is not built (those
+  clouds return a clear "unsupported" error); the AWS S3 path is verified against
+  MinIO and on real AWS.
 - **Column-level lineage** from SQL-log parsing, **classification scanners**,
   **SCIM**, the **Trino OPA bridge**, and **compiled secure views** are tracked
   follow-ups.

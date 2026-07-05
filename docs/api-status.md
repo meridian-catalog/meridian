@@ -290,8 +290,8 @@ opts in through storage options:
   a prefix condition; `PutObject`/`DeleteObject` added for read-write).
   Verified against MinIO (STS on the S3 endpoint; prefix isolation and
   TTL covered by integration + e2e tests, including a pyiceberg client
-  configured with only the catalog URI). Standard AWS STS semantics, but
-  **not yet cloud-verified against real AWS**.
+  configured with only the catalog URI). Standard AWS STS semantics,
+  **verified against MinIO and on real AWS**.
 - **`static`** — the warehouse's own keys passed through, unscoped and
   without expiry, for self-hosted setups with no STS: an explicit,
   documented trade-off, which is why it is a separate opt-in value.
@@ -353,7 +353,7 @@ never leave the server.
   0.11 client holding zero S3 configuration
   ([e2e](../conformance/e2e/tests/test_remote_signing.py) — requires the
   fsspec FileIO; pyiceberg's pyarrow FileIO has no remote-signing
-  support). **Not yet cloud-verified against real AWS.**
+  support). **Verified against MinIO and on real AWS.**
 
 ## Idempotency keys
 

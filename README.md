@@ -31,15 +31,16 @@ Every capability below is implemented and covered by tests. See [`docs/status.md
 
 ## Status
 
-> **Early / alpha — usable, not yet production-hardened.**
+> **Alpha — running on the cloud, still pre-1.0.**
 >
-> Meridian works today and you can run it against real engines (see [Quick start](#quick-start)). But it is young:
+> Meridian works today. It has been run on a cloud deployment (managed
+> PostgreSQL and S3 object storage) as well as locally against the engines in
+> the [conformance matrix](conformance/engines/README.md). It is still young:
 >
-> - "Implemented" means demonstrated on a developer machine against local Postgres, MinIO, and the engines in the [conformance matrix](conformance/engines/README.md) — **not** cloud-verified, load-tested, or run in production.
 > - **Authentication is off by default** (`auth.mode = "disabled"`) for the dev loop — with it off, anyone who can reach the port owns the catalog. Turn on OIDC (and with it deny-by-default RBAC) before exposing it to anyone.
-> - Known gaps are listed honestly in [`docs/status.md`](docs/status.md): the Iceberg REST compatibility kit (RCK) has not been run yet; cloud credential vending for GCS/Azure is stubbed and AWS STS is MinIO-verified but not AWS-cloud-verified; column-level lineage from SQL parsing, classification scanners, and SCIM are follow-ups.
-> - APIs, schemas, and configuration formats are unstable and will change without notice. There are no releases and no compatibility guarantees.
-> - **Do not run this in production** or near data you cannot lose.
+> - A few things are genuinely not built yet — listed honestly in [`docs/status.md`](docs/status.md): GCS and Azure credential vending (those clouds return a clear "unsupported" error today; AWS S3 vending and remote signing work); the Iceberg REST compatibility kit (RCK) has not been run yet; and column-level lineage from SQL parsing, classification scanners, and SCIM are follow-ups.
+> - APIs, schemas, and configuration formats are unstable and will change without notice. There are no tagged releases and no compatibility guarantees yet.
+> - It has not been load-tested at scale. Pin a commit and keep backups if you point it at data you care about.
 
 ## Quick start
 

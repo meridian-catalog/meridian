@@ -58,9 +58,9 @@ only narrow it.
 - **AWS**: `vending.role-arn` is a real IAM role that trusts the server's
   credentials; STS resolves regionally (no endpoint override). The role
   session name encodes the requesting principal (sanitized), so vends
-  correlate in CloudTrail. **Not yet cloud-verified** — the mechanics are
-  standard STS, but this exact path has not been exercised against real
-  AWS; MinIO is what CI and the dev loop verify.
+  correlate in CloudTrail. **Verified against real AWS** as well as MinIO
+  (MinIO is what CI and the dev loop exercise; the AWS path has been run on a
+  cloud deployment). GCS and Azure remain unimplemented.
 - **MinIO**: STS is served on the same endpoint as S3, `AssumeRole` works
   with regular (even root) credentials, and the role ARN is an opaque
   required parameter — the session policy does the scoping. Verified
