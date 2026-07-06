@@ -20,7 +20,8 @@ works but a stated piece is missing · **Not yet**: not built.
 
 ### A — Core catalog (IRC++)
 - **Implemented**: namespace/table/view CRUD; v2 + v3 metadata; the atomic
-  commit path (single- and multi-table, property/chaos tested); events
+  commit path (single- and multi-table, property tested — crash/fault-injection
+  "chaos" suite is deferred, see docs/design/commit-protocol.md); events
   (CloudEvents feed, durable consumers, HMAC webhooks); OIDC auth; RBAC;
   hash-chained audit log with `/verify`; ETags.
 - **Partial**: credential vending (AWS STS + static; automated tests cover
@@ -36,16 +37,22 @@ works but a stated piece is missing · **Not yet**: not built.
   error).
 
 ### B — Federation, sync & migration
-- **Implemented**: inbound mirrors (IRC + Glue) as read-only foreign assets;
-  the sprawl dashboard (duplicates, staleness, ownership gaps).
-- **Partial**: migration toolkit.
+- **Implemented**: inbound mirrors from `iceberg-rest` sources as read-only
+  foreign assets; the sprawl dashboard (duplicates, staleness, ownership gaps).
+- **Partial**: migration toolkit; Glue mirrors (a `glue` mirror can be
+  registered and validated, but syncing one returns an "unsupported kind" error
+  — only `iceberg-rest` inbound sync is implemented; Glue is a tracked future
+  source, see docs/adr/008-federation-inbound-mirrors.md).
 - **Not yet**: outbound projection (being mounted into UC/Glue); commit-forwarding
   proxy / dual-registration.
 
 ### C — Autonomous table operations + cost intelligence
 - **Implemented**: the zero-scan health model; maintenance policy engine; the
-  built-in DataFusion compaction executor (row-preservation verified end-to-end
-  through PyIceberg and DuckDB, including time travel); snapshot expiry; the
+  built-in arrow/parquet compaction executor (row-preservation verified in the
+  executor test suite by reading the rewritten Parquet back through real Iceberg
+  manifests and comparing a sorted projection row-for-row; the maintenance
+  worker test confirms the commit lands and reduces the live file count — no
+  PyIceberg/DuckDB or time-travel compaction test yet); snapshot expiry; the
   savings ledger.
 - **Partial**: maintenance ops (position-delete / deletion-vector merge-on-read
   compaction is **untested**; encoding normalization); external Spark/Trino
@@ -107,14 +114,19 @@ works but a stated piece is missing · **Not yet**: not built.
 
 ### J — Sharing & data products exchange
 - **Implemented**: cross-org shares — a recipient-specific read-only IRC endpoint
-  that serves **only** granted assets (non-shared assets 404; every write verb
-  403), applies column masks, vends read-only credentials, revokes instantly, and
-  audits every recipient access; the internal certified-data-product marketplace
-  with request-access.
-- **Partial (by honest design)**: a share's **row filter** is advisory over pure
-  IRC — a vended-credential engine reads Parquet directly, so row filtering is
-  surfaced as config, not prevented at that layer. Documented as detect, not
-  prevent.
+  that serves **only** granted assets (non-shared assets 404), applies column
+  masks, vends read-only credentials, and audits every recipient access; the
+  internal certified-data-product marketplace with request-access. Writes are
+  refused: the write verbs on the mounted share paths answer 403, and the rest of
+  the IRC write surface (transactions/commit, namespace properties & drop,
+  register, rename, view writes) is not routed on the share prefix at all, so it
+  falls through to 404/405 — either way no write reaches a shared table.
+- **Partial (by honest design)**: a share's **row filter and column mask** are
+  advisory over pure IRC — a vended-credential engine can read the Parquet
+  directly, so both are surfaced, not physically prevented at that layer
+  (documented as detect, not prevent). Revocation is instant with STS vending;
+  a `vending = static` warehouse passes through non-expiring keys that can
+  outlive revocation until rotated (see docs/design/sharing.md §3).
 - **Not yet** (explicit non-goals): external/public marketplace; clean rooms.
 
 ### K — Branching & data CI/CD

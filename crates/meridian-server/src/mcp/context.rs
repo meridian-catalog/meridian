@@ -243,14 +243,14 @@ async fn get_table_context(call: &GatewayCall<'_>, args: &Value) -> Result<ToolR
         "sample_values": Value::Null,
     });
 
+    // The agent-visible summary must not disclose that columns were removed —
+    // not even the count. A masked column is ABSENT, existence included (H-F2);
+    // leaking "(N hidden by policy)" here would let a prompt learn that
+    // restricted columns exist. The removed set is recorded only in the
+    // operator-facing audit detail below (`columns_removed`).
     let summary = format!(
-        "{warehouse}/{namespace}/{table_name}: {} column(s) visible{}",
+        "{warehouse}/{namespace}/{table_name}: {} column(s) visible",
         columns.len(),
-        if removed.is_empty() {
-            String::new()
-        } else {
-            format!(" ({} hidden by policy)", removed.len())
-        }
     );
 
     Ok(ToolResponse::context(

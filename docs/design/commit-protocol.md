@@ -361,9 +361,10 @@ interleavings of the load and swap steps of many committers):
 `CommitBackend` must pass this identical suite through the same trait**, plus
 what the model deliberately does not cover — requirement evaluation against
 real `TableMetadata` (the model asserts on pointer state only), index
-write-through content, audit/outbox rows, real storage I/O, and
-crash/fault injection (kill mid-transaction, storage 503s), which land with
-the store-backed tests and the chaos suite.
+write-through content, audit/outbox rows, and real storage I/O, which land
+with the store-backed tests. Crash/fault injection (kill mid-transaction,
+storage 503s) — the chaos suite — is **still deferred** (§10); it is not part
+of the passing suite today.
 
 ## 10. Milestone status
 

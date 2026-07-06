@@ -974,9 +974,13 @@ pub fn build_pages(
     // Effective stats-keep: the request's `stats-fields` restriction with any
     // governance-masked columns removed. A masked column's stats (sizes,
     // counts, bounds) are then omitted from every returned data file, so its
-    // values and value ranges never leave the catalog (D-F2.1 column masking
-    // → column removal on the scan-plan path). When nothing is masked and
-    // there is no stats restriction, `keep` stays `None` (send everything).
+    // values and value *ranges* never leak through plan metadata (D-F2.1 column
+    // masking on the scan-plan path). NOTE: this strips the column's statistics
+    // only — the plan carries no projected schema, so a client with scan access
+    // can still read the column's raw values from the data files; byte-level
+    // column protection is Layer 2 (compiled views) / Layer 4 (storage scope),
+    // see docs/design/enforcement-matrix.md. When nothing is masked and there
+    // is no stats restriction, `keep` stays `None` (send everything).
     let effective_keep: Option<BTreeSet<i32>> = match (ctx.stats_keep, ctx.strip_fields) {
         (None, None) => None,
         (Some(keep), None) => Some(keep.clone()),

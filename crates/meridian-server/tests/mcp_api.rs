@@ -926,6 +926,15 @@ async fn get_table_context_omits_masked_column() {
         !schema_str.contains("\"amount\""),
         "the schema block must not mention `amount` at all: {schema_str}"
     );
+    // (H-F2) The agent-visible summary text must not disclose that columns were
+    // hidden — not even the count. Leaking "(N hidden by policy)" would let a
+    // prompt learn that restricted columns exist. The removed set lives only in
+    // the operator-facing audit detail (asserted via the activity ledger below).
+    let summary_text = result["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        !summary_text.to_lowercase().contains("hidden"),
+        "the agent-visible summary must not reveal that columns were hidden: {summary_text:?}"
+    );
     // And the audit detail records the removal.
     // (The activity ledger is asserted directly below.)
     let removed = activity_count(&ctx, &agent.id, "allowed").await;

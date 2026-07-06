@@ -71,24 +71,35 @@ bridge) and `crates/meridian-server/src/routes/planning.rs` (the injection at
 async plans bake the enforcement into their stored pages at plan time).
 
 **The precise column-mask guarantee on the scan-plan path, and its limit.**
-A scan plan returns *file bytes*; it cannot rewrite a value. So a column mask
-on this path is enforced by **removing the column** from the plan — the plan
-carries none of that column's statistics, and the removed set is signalled to
-the client. This is exactly what the agent gateway (H-F2) needs: a restricted
-column is *absent*, not nulled, so its schema cannot leak. It is strictly
-fail-closed: the value is never offered. **But** a client that already learned
-the full schema from `loadTable` and then reads the underlying Parquet files
-directly (rather than only the columns the plan implies) is not stopped by the
-plan alone — a "visible-but-masked" value (e.g. show last four digits) that a
-customer wants *returned but transformed* is a Layer-2 (compiled secure view)
-concern, not scan planning. For scan-plan clients the honest guarantee is:
+A scan plan returns *file references and residuals*; it carries no projected
+schema and cannot rewrite a value. So a column mask on this path is enforced by
+**stripping the masked column's statistics** (sizes, value/null/NaN counts,
+lower/upper bounds) from every returned data file, and recording the removed set
+on the plan and in the audit trail. That means the column's *values and value
+ranges never leak through plan metadata*, and every masked-plan decision is
+audited. **What it does not do:** the plan does not project the column away
+(there is no select list in the response — see the code comment at
+`routes/planning.rs`, "`select` … does not change the response today"), the
+column name is already known to the client from `loadTable`, and the underlying
+Parquet still contains the column's bytes. So a client with scan access can
+still read the raw values by projecting the column from the referenced files.
+True value-level column prevention (including a "visible-but-masked" transform
+like last-four-digits) is a **Layer 2** (compiled secure view) guarantee, not
+yet implemented. For scan-plan clients the honest guarantee is:
 
-- masked column **absent from the plan** and its stats **withheld** →
-  **PREVENT** for clients that project from the plan (the common thin-client
-  path);
-- byte-level guarantee that a broad-credential client cannot open the file and
-  read the raw column comes from **Layer 4** (storage scope) plus **Layer 2**
-  (view-path access), documented as such below rather than overclaimed here.
+- masked column's **statistics withheld** from the plan → values and ranges do
+  not leak via plan metadata, and the decision is **audited** — but this is
+  stats-withholding + DETECT, **not** value-level PREVENT;
+- the byte-level bound that a broad-credential client cannot read the raw column
+  is **not** provided at the plan level today — it comes from **Layer 4**
+  (storage scope, table-prefix granularity) and, once shipped, **Layer 2**
+  (view path). Do not read the plan-level column-mask cell as "the values are
+  unreadable."
+
+(The agent-gateway path (H-F2) is different: `mcp/context.rs` actually removes
+masked columns from the returned schema, so on *that* surface a restricted
+column is genuinely absent, name included. That is a governed-context tool, not
+the IRC scan plan.)
 
 ### Layer 2 — Compiled secure views (designed; not yet implemented)
 
@@ -137,8 +148,8 @@ on.
 
 | Engine / access path | Row filter | Column mask | ABAC deny | Storage floor (always on) |
 |---|---|---|---|---|
-| **DuckDB / PyIceberg / Daft — via server-side scan planning** | **PREVENT** (residual injected) | **PREVENT** at plan level: column absent, stats withheld (byte-level: floor + Layer 2) | **PREVENT** (403 before files) | PREVENT (prefix bound) |
-| **Any 1.11-planning client — via scan planning** | **PREVENT** | **PREVENT** at plan level (as above) | **PREVENT** | PREVENT |
+| **DuckDB / PyIceberg / Daft — via server-side scan planning** | **PREVENT** (residual injected) | **DETECT + stats withheld**: column's stats stripped from the plan (values/ranges don't leak via metadata) and audited, but values remain readable — value-level PREVENT is Layer 2; byte bound is the storage floor | **PREVENT** (403 before files) | PREVENT (prefix bound) |
+| **Any 1.11-planning client — via scan planning** | **PREVENT** | **DETECT + stats withheld** (as above) | **PREVENT** | PREVENT |
 | **Trino — direct table SQL (no planning)** | Layer 2 (M4b); today **NONE** beyond floor | Layer 2 (M4b); today **NONE** beyond floor | Layer 3 OPA (M4b); today **NONE** beyond floor | PREVENT |
 | **Spark — direct table SQL (no planning)** | Layer 2 (M4b); today **NONE** beyond floor | Layer 2 (M4b); today **NONE** beyond floor | Layer 3 plugin (M4b); today **NONE** beyond floor | PREVENT |
 | **Snowflake / ClickHouse / StarRocks — via compiled view (Layer 2)** | PREVENT once M4b ships | PREVENT once M4b ships (transforming masks too) | PREVENT once M4b ships | PREVENT |
@@ -147,11 +158,14 @@ on.
 
 Notes that keep this honest:
 
-1. **The scan-plan column-mask cell says "PREVENT at plan level"**, not
-   unqualified PREVENT, precisely because of the loadTable-schema limit above.
-   The strongest byte-level column guarantee available today is the storage
-   floor plus (once shipped) the view path; do not read the plan-level cell as
-   "the raw bytes are unreadable by a determined broad-credential client."
+1. **The scan-plan column-mask cell says "DETECT + stats withheld"**, not
+   PREVENT, because the plan strips the column's *statistics* but does not
+   project the column out (no select list in the response) — so a client with
+   scan access can still read the raw values from the referenced files, and the
+   column name is already known from `loadTable`. The strongest column guarantee
+   available today is the storage floor (table-prefix) plus (once shipped) the
+   Layer-2 view path; do not read the plan-level cell as "the values are
+   unreadable by a determined broad-credential client."
 2. **Direct-SQL rows for Trino/Spark are NONE-beyond-floor today**, not
    PREVENT. Compiled views (Layer 2) are what will make them PREVENT; until
    that lands, the honest statement is that a Trino user with a direct table

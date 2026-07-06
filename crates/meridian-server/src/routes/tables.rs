@@ -1464,6 +1464,11 @@ pub async fn report_metrics(
         &SecurableScope::table(&warehouse.id, chain, Some(&record.id)),
     )
     .await?;
+    // A metrics report is a Write against the table's observability state, so a
+    // foreign (mirrored, read-only) table rejects it like every other write verb
+    // (Pillar B, B-F1) — keeps "foreign assets are read-only" true without a
+    // telemetry carve-out (see docs/adr/008-federation-inbound-mirrors.md).
+    reject_if_foreign(&record, &levels, &name)?;
     if !report.is_object() {
         return Err(ApiError::bad_request(
             "metrics report must be a JSON object",

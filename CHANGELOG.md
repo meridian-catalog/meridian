@@ -30,6 +30,40 @@ releases begin, the project will adhere to
 - **Agent budget gate** now uses saturating arithmetic, so an oversized or
   corrupt scanned-bytes estimate saturates to a refusal instead of overflowing
   `i64` and failing open.
+- **Second honesty pass (adversarial audit).** A multi-agent audit (findings
+  cross-checked by independent skeptics) surfaced more overclaims, now corrected:
+  - **Scan-plan column masking.** The README, `docs/status.md`, and the
+    enforcement matrix said a masked column is *absent from the plan* / a "thin
+    client cannot read what it may not." In fact the scan-plan path strips the
+    column's **statistics** only — the plan carries no projected schema, so a
+    client with scan access can still read the raw values until compiled secure
+    views (Layer 2) land. Reworded to "stats withheld + audited (DETECT), not
+    value-level PREVENT"; the byte bound today is the storage-prefix floor. The
+    agent-gateway path *does* remove the column from the returned schema — that
+    claim stands.
+  - **Compaction verification.** Dropped the "verified end-to-end through
+    PyIceberg and DuckDB, including time travel" claim (no such test exists) in
+    favor of the accurate scope: in-crate read-back of the rewritten Parquet with
+    row-for-row comparison, plus a maintenance-worker file-count check.
+  - **Glue federation** moved from "Implemented" to "Partial": a `glue` mirror
+    can be registered but not synced (only `iceberg-rest` inbound sync exists).
+  - **Commit "chaos" suite** relabeled "property suite" everywhere — crash/fault
+    injection is deferred per `commit-protocol.md`, not passing today.
+  - **Share revocation** qualified with the `vending = static` caveat (static
+    keys don't expire, so they can outlive revocation).
+  - **Compaction executor** relabeled arrow/parquet (not DataFusion), per ADR 007.
+
+### Fixed (behavior)
+
+- **Foreign-table metrics guard.** `reportMetrics` against a foreign (mirrored,
+  read-only) table is now rejected like every other write verb (it was silently
+  stored), making "foreign assets are read-only" true without a telemetry
+  carve-out.
+- **Agent governed-context leak.** The MCP `get_table_context` summary no longer
+  discloses the count of policy-hidden columns to the agent (it leaked
+  "(N hidden by policy)" into the model-visible text); the removed set stays in
+  the operator-facing audit detail only, so a prompt cannot learn that restricted
+  columns exist.
 
 ### Added
 
@@ -324,7 +358,7 @@ releases begin, the project will adhere to
   fully-audited commits. Every mode writes a `contract_violations` record + a
   CloudEvent. The hook preserves **every** commit invariant (I1–I6): the CAS,
   lock order, idempotency recall, and multi-table atomicity are untouched (the
-  existing commit property/chaos suite passes unchanged); an eval error
+  existing commit property suite passes unchanged); an eval error
   fails-closed for block/quarantine and fails-open for warn (documented). New
   store module `meridian_store::contracts`, a pure
   `TableMetadata::quarantine_retarget` transform, migration `0018_contracts`,

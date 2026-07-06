@@ -452,9 +452,11 @@ pub struct QueryCost {
 ///
 /// Runs in its own transaction, taking the budget row `FOR UPDATE` so
 /// concurrent tool calls from the same agent cannot race past a cap. On
-/// [`BudgetOutcome::Refused`] nothing is consumed and the row is left rolled
-/// (an elapsed window still resets even on a refusal — the refusal reflects the
-/// *current* window). An agent with no budget row is treated as fully uncapped
+/// [`BudgetOutcome::Refused`] nothing is consumed and the transaction is rolled
+/// back — the window roll computed for this call is *not* persisted (the next
+/// allowed call re-rolls and persists; the roll is idempotent on read). The
+/// refusal's returned counters still reflect the *current* rolled window. An
+/// agent with no budget row is treated as fully uncapped
 /// (returns `Allowed` with zero usage) — registration always creates one, so
 /// this only covers a manually-inserted legacy agent.
 pub async fn check_and_consume_budget(
@@ -572,10 +574,11 @@ pub async fn check_and_consume_budget(
     })
 }
 
-/// Commits the rolled (but not consumed) budget window and returns a refusal.
-/// The window reset is persisted so a later call sees the fresh window even
-/// though this one was refused; the counters themselves are unchanged from
-/// their rolled values (no increment).
+/// Rolls back and returns a refusal. The window roll computed for this call is
+/// *not* persisted (rolling on refusal is a nicety, not a correctness need, and
+/// a pure read avoids a write under the `FOR UPDATE` lock on the common refusal
+/// path); the next allowed call re-rolls and persists. The returned counters
+/// reflect the rolled (in-memory) window at the moment of refusal.
 async fn refuse(
     tx: sqlx::Transaction<'_, sqlx::Postgres>,
     dimension: BudgetDimension,

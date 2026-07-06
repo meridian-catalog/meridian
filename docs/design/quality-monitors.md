@@ -147,4 +147,4 @@ The worker is a **read-side consumer**: it adds no pointer-mutation path and doe
 not touch the commit transaction, the CAS, lock order, idempotency, or
 multi-table atomicity. The monitor-result write and the incident it may open
 share their *own* transaction, disjoint from any commit. The existing commit
-property/chaos suite passes unchanged.
+property suite passes unchanged.

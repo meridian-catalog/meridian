@@ -24,10 +24,15 @@
 //!
 //! # Honest scope (stated plainly, per project rules)
 //!
-//! - **Revocation is instant in effect.** The recipient only ever holds
-//!   short-lived vended credentials; the moment a share is revoked the endpoint
-//!   returns 403 and vends nothing new, and any already-vended credentials
-//!   expire on their TTL. There is no long-lived key to claw back.
+//! - **Revocation is instant in effect *with STS vending*.** The moment a share
+//!   is revoked the endpoint returns 403 and vends nothing new. On an
+//!   STS-vending warehouse the recipient only ever holds short-lived credentials
+//!   that expire on their TTL, so there is no long-lived key to claw back.
+//!   **Caveat:** a warehouse configured `vending = static` passes through
+//!   non-expiring keys (see `docs/design/sharing.md` §3 and `routes/vending.rs`),
+//!   so a recipient of a static-vending share can retain access past revocation
+//!   until those keys are rotated — use STS vending where instant revocation
+//!   matters.
 //!
 //! - **Column masking over a pure IRC + vended-credential share is *surfaced*,
 //!   not physically prevented — the same caveat as row filtering below.**

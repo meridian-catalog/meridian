@@ -309,6 +309,27 @@ async fn mirror_syncs_foreign_tables_searchable_and_read_only() {
         "create under a foreign warehouse must be rejected: {body}"
     );
 
+    // A metrics report is a write against the table's observability state, so a
+    // foreign table rejects it too — "foreign assets are read-only" has no
+    // telemetry carve-out (see docs/adr/008-federation-inbound-mirrors.md).
+    let (status, body) = srv
+        .post(
+            &format!("/v1/{foreign_wh}/namespaces/analytics/tables/orders/metrics"),
+            &json!({ "report-type": "scan-report", "table-name": "orders" }),
+        )
+        .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::CONFLICT,
+        "a metrics report against a foreign table must be rejected with 409: {body}"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("foreign") || m.contains("read-only")),
+        "metrics rejection message must explain the table is foreign/read-only: {body}"
+    );
+
     // Re-syncing is incremental: nothing changed on the source, so the second
     // run reports both tables unchanged and inserts none.
     let (status, body) = srv

@@ -328,8 +328,12 @@ pub fn build_router(state: AppState) -> Router {
         // share's opaque token in the path. Authenticated by the token (the
         // `/share/` prefix is exempt from the OIDC middleware — see
         // crate::auth); serves only the shared assets, read-only, with vended
-        // read-only credentials and the grant's column mask applied. Every
-        // write verb is answered 403 (a share is read-only by construction).
+        // read-only credentials and the grant's column mask applied. Writes are
+        // refused: the write verbs on the mounted paths answer 403
+        // (`recipient_write_rejected`); the rest of the IRC write surface
+        // (transactions/commit, namespace properties & drop, register, rename,
+        // view writes) is not routed on the `/share/` prefix at all, so it falls
+        // through to 404/405 — either way no write reaches a shared table.
         .route(
             "/share/{token}/v1/config",
             get(routes::shares::recipient_config),
