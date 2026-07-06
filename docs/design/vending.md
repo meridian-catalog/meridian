@@ -1,9 +1,11 @@
 # Credential vending
 
-Status: implemented for S3-compatible storage (AWS STS semantics, verified
-against MinIO); GCS and Azure are honest stubs. This document records the
-design and its decisions; [`docs/api-status.md`](../api-status.md) is the
-authoritative statement of endpoint behavior.
+Status: implemented for S3-compatible storage (AWS STS semantics; automated
+tests cover MinIO, and the real-AWS path has been run on a cloud deployment by
+the maintainer, though it is not yet in the automated suite); GCS and Azure are
+honest stubs. This document records the design and its decisions;
+[`docs/api-status.md`](../api-status.md) is the authoritative statement of
+endpoint behavior.
 
 ## What it is
 
@@ -58,9 +60,10 @@ only narrow it.
 - **AWS**: `vending.role-arn` is a real IAM role that trusts the server's
   credentials; STS resolves regionally (no endpoint override). The role
   session name encodes the requesting principal (sanitized), so vends
-  correlate in CloudTrail. **Verified against real AWS** as well as MinIO
-  (MinIO is what CI and the dev loop exercise; the AWS path has been run on a
-  cloud deployment). GCS and Azure remain unimplemented.
+  correlate in CloudTrail. MinIO is what CI and the dev loop exercise; the AWS
+  path has been **run on a real cloud deployment by the maintainer** but is not
+  yet covered by an automated test in this repo. GCS and Azure remain
+  unimplemented.
 - **MinIO**: STS is served on the same endpoint as S3, `AssumeRole` works
   with regular (even root) credentials, and the role ARN is an opaque
   required parameter — the session policy does the scoping. Verified

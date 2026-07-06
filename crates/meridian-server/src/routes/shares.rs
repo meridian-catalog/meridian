@@ -29,9 +29,23 @@
 //!   returns 403 and vends nothing new, and any already-vended credentials
 //!   expire on their TTL. There is no long-lived key to claw back.
 //!
-//! - **Column masking is enforced at the catalog layer** by dropping the
-//!   masked columns from the served schema, so a recipient engine never learns
-//!   they exist and cannot select them.
+//! - **Column masking over a pure IRC + vended-credential share is *surfaced*,
+//!   not physically prevented — the same caveat as row filtering below.**
+//!   Meridian drops masked columns from the served schema, so a schema-aware
+//!   recipient engine does not see or select them. But the recipient holds
+//!   read credentials scoped to the table's storage prefix and can read the
+//!   Parquet files directly, where a masked column's bytes are still present.
+//!   Physical column-level enforcement requires the query-mediated path
+//!   (server-side scan planning / the governed executor, Pillar D/H), not a
+//!   raw vended-credential read. Treat the share mask as detect/deter at this
+//!   layer, and share only columns the recipient may physically read when the
+//!   guarantee must be hard.
+//!
+//! - **Workspace ABAC does not transfer to a share.** A share applies only the
+//!   grant's own row filter and column mask — it does *not* re-resolve the
+//!   table's catalog-wide Cedar/tag policies (e.g. a `pii:high` tag policy) for
+//!   the recipient. Restate any protection that must hold as an explicit grant
+//!   filter/mask on the share; the workspace policy layer is not a floor here.
 //!
 //! - **Row filtering over a pure IRC catalog is advisory.** A vended-credential
 //!   engine reads Parquet directly from object storage; the catalog cannot
@@ -640,7 +654,10 @@ pub async fn recipient_config(
 }
 
 /// The read-only endpoint subset the recipient catalog advertises. No
-/// create/commit/rename/delete: a share is read-only by construction.
+/// create/commit/rename/delete: a share is read-only by construction. There is
+/// no separate `.../credentials` endpoint here — vended read-only credentials
+/// are delivered inline in the `LoadTableResult.config`, so a recipient never
+/// needs a second round-trip.
 const RECIPIENT_ENDPOINTS: &[&str] = &[
     "GET /v1/{prefix}/namespaces",
     "GET /v1/{prefix}/namespaces/{namespace}",
@@ -648,7 +665,6 @@ const RECIPIENT_ENDPOINTS: &[&str] = &[
     "GET /v1/{prefix}/namespaces/{namespace}/tables",
     "GET /v1/{prefix}/namespaces/{namespace}/tables/{table}",
     "HEAD /v1/{prefix}/namespaces/{namespace}/tables/{table}",
-    "GET /v1/{prefix}/namespaces/{namespace}/tables/{table}/credentials",
 ];
 
 /// `POST /share/{token}/terms/accept` — the recipient accepts the share's
@@ -936,12 +952,16 @@ fn metadata_to_value(metadata: &meridian_iceberg::spec::TableMetadata) -> Result
 }
 
 /// Drops the named columns from the current schema of a serialized
-/// `LoadTableResult` metadata, so the recipient never sees masked columns.
-/// Matching is case-insensitive on the top-level field name. Returns silently
-/// if the metadata shape is unexpected (the mask is best-effort at the JSON
-/// layer, and an unrecognized shape simply serves the unmasked schema — but
-/// the recipient still cannot read masked *files* without the column present in
-/// their query, and this is documented).
+/// `LoadTableResult` metadata, so a schema-aware recipient engine does not see
+/// or select masked columns. Matching is case-insensitive on the top-level
+/// field name. Returns silently if the metadata shape is unexpected (best-effort
+/// at the JSON layer; an unrecognized shape serves the unmasked schema).
+///
+/// This is *schema-level surfacing, not physical prevention*: the recipient
+/// holds storage-prefix-scoped read credentials and can read the underlying
+/// Parquet directly, where the masked column's bytes remain. See the module
+/// docs — hard per-column enforcement needs the query-mediated path, not a raw
+/// vended-credential read.
 fn apply_column_mask(body: &mut Value, mask: &[String]) {
     let lower: std::collections::BTreeSet<String> = mask.iter().map(|c| c.to_lowercase()).collect();
     let Some(metadata) = body.get_mut("metadata").and_then(Value::as_object_mut) else {

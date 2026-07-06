@@ -104,9 +104,16 @@ answer to "who read what, when").
   expire — so static-vending warehouses trade instant revocation for
   simplicity; use STS vending where instant revocation matters.)
 
-- **Column masking: prevented at the catalog layer.** Masked columns are
-  dropped from the served current schema, so a recipient engine never learns
-  they exist and cannot select them.
+- **Column masking: surfaced, not physically prevented** (same as row
+  filtering, below). Masked columns are dropped from the served current schema,
+  so a schema-aware recipient engine does not see or select them. But the
+  recipient holds read credentials scoped to the table's storage prefix and can
+  read the underlying Parquet directly, where the masked column's bytes are
+  still present. Hard per-column enforcement requires the query-mediated path
+  (server-side scan planning / the governed executor), not a raw
+  vended-credential read — so share only columns the recipient may physically
+  read when the guarantee must be hard, and treat the mask as detect/deter over
+  the neutral IRC endpoint.
 
 - **Row filtering: surfaced, not prevented.** A vended-credential engine reads
   Parquet directly from object storage; a pure IRC catalog cannot interpose a

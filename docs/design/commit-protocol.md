@@ -63,8 +63,10 @@ outside it.
    current `metadata.json`. A violated requirement rolls back and returns
    `409 CommitFailedException` — the client must refresh and rebuild its
    commit. (Pre-commit hooks — synchronous, cheap predicates such as contract
-   checks — run here too; they belong to a later milestone and are out of
-   scope for this document, but this is their insertion point.)
+   checks — run here too. This is now live: the data-contract circuit breaker
+   evaluates enabled contracts against the staged metadata at this point and
+   can block, quarantine, or warn. See
+   [`contracts-circuit-breaker.md`](contracts-circuit-breaker.md).)
 7. **Apply updates and stage the result.** Apply the update list to the
    loaded metadata, producing candidate metadata; validate structural
    invariants (ids resolve, refs point at snapshots that exist, monotonic
@@ -385,7 +387,6 @@ Still deferred (tracked, not forgotten):
   corruption).
 - Crash/fault injection (kill mid-transaction, storage 503s) — the chaos
   suite.
-- Pre-commit hook insertion (§3 step 6) once contracts exist.
 - Requirement evaluation served from the Postgres index (§3 step 6 mentions
   the index fast path); the implementation currently always reads the
   current `metadata.json`, which it needs anyway as the update base.

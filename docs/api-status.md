@@ -291,7 +291,8 @@ opts in through storage options:
   Verified against MinIO (STS on the S3 endpoint; prefix isolation and
   TTL covered by integration + e2e tests, including a pyiceberg client
   configured with only the catalog URI). Standard AWS STS semantics,
-  **verified against MinIO and on real AWS**.
+  **covered by automated tests against MinIO; the real-AWS path has been run on
+  a cloud deployment by the maintainer but is not yet in the automated suite**.
 - **`static`** — the warehouse's own keys passed through, unscoped and
   without expiry, for self-hosted setups with no STS: an explicit,
   documented trade-off, which is why it is a separate opt-in value.
@@ -353,7 +354,8 @@ never leave the server.
   0.11 client holding zero S3 configuration
   ([e2e](../conformance/e2e/tests/test_remote_signing.py) — requires the
   fsspec FileIO; pyiceberg's pyarrow FileIO has no remote-signing
-  support). **Verified against MinIO and on real AWS.**
+  support). **Automated against MinIO; run on real AWS by the maintainer, not
+  yet in the automated suite.**
 
 ## Idempotency keys
 

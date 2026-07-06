@@ -204,6 +204,14 @@ For each diverged table `(branch, T)`:
    main commit that lands between the conflict check and the merge CAS makes the guard fail →
    the merge reports the table as newly-conflicting rather than clobbering (no lost update).
 
+   The atomicity here is **per table, not across the whole multi-table merge**: each merged
+   table is a valid, independent main commit. If a concurrent main commit trips one table's
+   CAS partway through, the tables already applied stay applied and the tripped table (plus
+   any after it) reports as newly-conflicting — main can be left partially advanced. That is
+   safe (no lost update, no corrupt table), but it is not an all-or-nothing multi-table
+   transaction; re-run the merge to carry the remaining tables forward. A single-Postgres-
+   transaction multi-table merge is future work (§9).
+
 After a successful merge the branch is marked `merged`.
 
 ## 7. Merge gates — Data CI/CD (K-F3)

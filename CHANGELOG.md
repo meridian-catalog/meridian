@@ -10,6 +10,27 @@ releases begin, the project will adhere to
 
 ## [Unreleased]
 
+### Notes
+
+- **Cloud run.** The AWS S3 credential-vending and remote-signing paths — whose
+  earlier entries note "not yet cloud-verified against real AWS" (accurate at
+  the time) — have since been run on a real cloud deployment (managed
+  PostgreSQL + S3) by the maintainer and worked. This is not yet a reproducible
+  automated test in CI (which still exercises MinIO); treat it as
+  maintainer-verified, not suite-verified.
+
+### Fixed
+
+- **Honesty pass (docs).** Corrected the share column-mask docs to say masking
+  over the vended-credential recipient path is *surfaced, not physically
+  prevented* (the recipient holds prefix-scoped read creds and can read Parquet
+  directly — the same caveat the row filter already carried); documented that a
+  table's workspace ABAC does not transfer to a share grant; and reconciled the
+  AWS-verification wording across `status.md`/`api-status.md`/`vending.md`.
+- **Agent budget gate** now uses saturating arithmetic, so an oversized or
+  corrupt scanned-bytes estimate saturates to a refusal instead of overflowing
+  `i64` and failing open.
+
 ### Added
 
 - **Branching & Data CI/CD — catalog branching every engine can consume**

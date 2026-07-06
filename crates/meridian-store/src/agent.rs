@@ -503,14 +503,19 @@ pub async fn check_and_consume_budget(
         now,
     );
 
-    // Check each cap against (current usage + this call's increment).
+    // Check each cap against (current usage + this call's increment). Use
+    // saturating arithmetic: `cost.bytes`/`cost.cost_micros` are clamped to
+    // i64::MAX upstream (an oversized or corrupt manifest estimate), so a plain
+    // `+` could overflow — in release that wraps negative and silently passes
+    // the `> limit` check, failing OPEN. Saturating to i64::MAX makes an
+    // oversized estimate refuse, which is the safe direction.
     if let Some(limit) = budget.queries_per_hour
-        && queries_used + 1 > limit
+        && queries_used.saturating_add(1) > limit
     {
         return refuse(tx, BudgetDimension::QueriesPerHour, limit, queries_used, 1).await;
     }
     if let Some(limit) = budget.scanned_bytes_per_day
-        && bytes_used + cost.bytes > limit
+        && bytes_used.saturating_add(cost.bytes) > limit
     {
         return refuse(
             tx,
@@ -522,7 +527,7 @@ pub async fn check_and_consume_budget(
         .await;
     }
     if let Some(limit) = budget.dollar_cap_micros
-        && cost_used + cost.cost_micros > limit
+        && cost_used.saturating_add(cost.cost_micros) > limit
     {
         return refuse(
             tx,
@@ -534,10 +539,10 @@ pub async fn check_and_consume_budget(
         .await;
     }
 
-    // Within budget: consume.
-    queries_used += 1;
-    bytes_used += cost.bytes;
-    cost_used += cost.cost_micros;
+    // Within budget: consume (saturating, matching the checks above).
+    queries_used = queries_used.saturating_add(1);
+    bytes_used = bytes_used.saturating_add(cost.bytes);
+    cost_used = cost_used.saturating_add(cost.cost_micros);
 
     sqlx::query(
         "UPDATE agent_budgets SET

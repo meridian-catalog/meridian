@@ -23,10 +23,11 @@ works but a stated piece is missing · **Not yet**: not built.
   commit path (single- and multi-table, property/chaos tested); events
   (CloudEvents feed, durable consumers, HMAC webhooks); OIDC auth; RBAC;
   hash-chained audit log with `/verify`; ETags.
-- **Partial**: credential vending (AWS STS + static, verified against MinIO and
-  on real AWS S3; GCS/Azure not built); remote signing (S3, verified against
-  MinIO and AWS); scan planning (point-in-time only, no incremental); search
-  (Postgres FTS, no
+- **Partial**: credential vending (AWS STS + static; automated tests cover
+  MinIO, and the AWS S3 path has been run on a real cloud deployment by the
+  maintainer but is not yet in the automated suite; GCS/Azure not built);
+  remote signing (S3; MinIO in CI, exercised on real AWS by the maintainer);
+  scan planning (point-in-time only, no incremental); search (Postgres FTS, no
   semantic/pgvector or usage ranking); tenancy (single-workspace default);
   `register` (rejects `overwrite:true` and UUID-alias adoption); CLI + Terraform
   + catalog-as-code.
@@ -143,8 +144,9 @@ works but a stated piece is missing · **Not yet**: not built.
   yet; conformance today rests on the engine matrix (PyIceberg, DuckDB, Flink,
   Spark, Trino) and the endpoint checks in `api-status.md`.
 - **Credential vending / remote signing** for GCS and Azure is not built (those
-  clouds return a clear "unsupported" error); the AWS S3 path is verified against
-  MinIO and on real AWS.
+  clouds return a clear "unsupported" error). The AWS S3 path is covered by
+  automated tests against MinIO and has been run on a real cloud deployment by
+  the maintainer; a reproducible real-AWS test is not yet in the suite.
 - **Column-level lineage** from SQL-log parsing, **classification scanners**,
   **SCIM**, the **Trino OPA bridge**, and **compiled secure views** are tracked
   follow-ups.
