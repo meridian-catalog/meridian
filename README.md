@@ -2,7 +2,7 @@
 
 **The agentic Iceberg REST Catalog** — an open-source, Apache Iceberg-native catalog with operations, governance, observability, semantics, and agent access built *in*.
 
-**[meridian-catalog.github.io](https://meridian-catalog.github.io)** · [feature status](docs/status.md) · [quick start](#quick-start) · [why it's different](#the-moat)
+**[meridian-catalog.github.io](https://meridian-catalog.github.io)** · [API reference](https://meridian-catalog.github.io/api.html) · [feature status](docs/status.md) · [quick start](#quick-start) · [why it's different](#why-its-different)
 
 > **Note on the name:** "Meridian" is a working name and may change before the first public release.
 
@@ -14,7 +14,7 @@ Most data catalogs are bare metadata stores: they track table pointers and schem
 
 The catalog is the one component every engine already talks to. Meridian's premise is that these operational concerns belong in the catalog itself, implemented once, engine-neutrally — so they work the same whether the table is read by Spark, Trino, Flink, DuckDB, or an AI agent.
 
-## The moat
+## Why it's different
 
 Here's the structural insight the whole thing is built on:
 
@@ -65,9 +65,12 @@ Every capability below is implemented and covered by tests. See [`docs/status.md
 
 ## Quick start
 
-Everything in Docker (Postgres + the Meridian server; migrations run on startup):
+Clone it, then bring everything up in Docker (Postgres + the Meridian server; migrations run on startup):
 
 ```sh
+git clone https://github.com/meridian-catalog/meridian.git
+cd meridian
+
 docker compose -f docker-compose.dev.yml up --build
 
 curl -s localhost:8181/healthz
