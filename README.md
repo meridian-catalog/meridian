@@ -2,6 +2,8 @@
 
 **The agentic Iceberg REST Catalog** — an open-source, Apache Iceberg-native catalog with operations, governance, observability, semantics, and agent access built *in*.
 
+**[meridian-catalog.github.io](https://meridian-catalog.github.io)** · [feature status](docs/status.md) · [quick start](#quick-start) · [why it's different](#the-moat)
+
 > **Note on the name:** "Meridian" is a working name and may change before the first public release.
 
 Meridian implements the [Apache Iceberg](https://iceberg.apache.org/) REST Catalog (IRC) specification as a drop-in catalog for any IRC-compatible engine — Spark, Trino, Flink, DuckDB, PyIceberg — and builds the operational layers that usually live *around* a catalog directly *into* it. It runs today: point a real engine at it and it works.
