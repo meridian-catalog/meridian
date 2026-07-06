@@ -8,9 +8,28 @@ Meridian implements the [Apache Iceberg](https://iceberg.apache.org/) REST Catal
 
 ## Why
 
-Most data catalogs are bare metadata stores: they track table pointers and schemas, and stop there. Everything a real deployment needs on top — maintenance jobs, access policies, quality monitoring, semantic definitions, agent access — gets bolted on as separate tools, each with its own view of the data and its own engine-specific integration.
+Most data catalogs are bare metadata stores: they track table pointers and schemas, and stop there. Everything a real deployment needs on top — maintenance jobs, access policies, quality monitoring, semantic definitions, agent access — gets bolted on as separate tools, each with its own view of the data, its own connectors, and its own engine-specific integration.
 
 The catalog is the one component every engine already talks to. Meridian's premise is that these operational concerns belong in the catalog itself, implemented once, engine-neutrally — so they work the same whether the table is read by Spark, Trino, Flink, DuckDB, or an AI agent.
+
+## The moat
+
+Here's the structural insight the whole thing is built on:
+
+> **The catalog is the only component that sits in *both* the write path and the read path of every engine.** Every Iceberg commit flows through it atomically. Every table load, credential vend, and scan plan flows through it too. Nothing else in the stack touches every change *and* every access.
+
+Every tool that bolts governance, quality, or lineage on *from the outside* is approximating that position with connectors, periodic crawls, and query-log scraping — and paying for it with staleness, blind spots, and per-engine integration tax. A catalog does these things **natively, transactionally, and with zero instrumentation.** That's not a marginal edge; it's a different physics. Because Meridian sees the transaction, it can do things an outside-in tool structurally cannot:
+
+- **Stop bad data before it lands, not alarm after.** A data contract is enforced *at commit time* — a schema-violating write is rejected atomically, or quarantined to an audit branch, or waved through with an incident. Observability vendors sell faster alarms; Meridian sells the fire not starting. *([circuit breaker](docs/design/contracts-circuit-breaker.md))*
+- **Enforce row/column policy inside the scan plan.** Masked columns are *absent* from the plan the engine executes and row filters are injected as residuals — the same mechanism the walled gardens reserve for themselves, from a neutral catalog that any engine can point at. A thin client cannot read what it may not.
+- **Repair what engines emit.** Flink sprays small files; some engines write pathological layouts. Meridian's compaction rewrites them into house style through a normal, audited, revertible commit — every row preserved (verified through PyIceberg *and* DuckDB). Engines' weaknesses become the catalog's feature.
+- **One view, every dialect.** Author a view once; every engine reads it in its own SQL dialect, transpiled and labeled `verified` / `best-effort` / `unsupported` — the five-year-old cross-engine view bug class, closed.
+- **Branches any engine can use.** A branch mounts as `warehouse@branch`, so *every* IRC engine reads and writes zero-copy dev environments on prod data without knowing branching exists.
+- **A real firewall for AI agents.** Every agent gets an identity, a purpose, a budget, a kill switch, and a court-grade audit trail — on columns and rows, not just tool calls — and governed context returns restricted columns *absent* so a prompt can't even learn their names.
+
+And because it's all one system on one substrate, the parts compound: lineage powers contract impact-analysis powers agent trust; maintenance telemetry powers the savings ledger powers the renewal conversation. Point solutions can't compound — they don't share a substrate.
+
+Meridian is engine-neutral by design: an Apache-2.0 catalog you own and run, that any IRC-compatible engine can point at, with PostgreSQL as its only required dependency. Neutrality isn't a marketing line here — it's the product.
 
 ## What it does
 
