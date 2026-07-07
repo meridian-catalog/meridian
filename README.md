@@ -107,6 +107,10 @@ Running from source, the web console, engine examples (Spark/Trino/Flink/DuckDB)
 
 The codebase is a Cargo workspace (catalog core, storage IO, the Iceberg metadata/manifest engine, vending, authz, federation, lineage, agents, and a small-scan query executor), a Python sidecar, the console, a Terraform provider, and an engine conformance harness. Significant decisions are recorded in [docs/adr/](docs/adr/).
 
+## Running in production
+
+To run Meridian as a real service — turning on OIDC authentication, sizing and backing up PostgreSQL, terminating TLS, health probes, upgrades, and the full configuration reference — see [docs/deployment.md](docs/deployment.md). **Authentication is off by default**; never expose a `disabled`-mode server.
+
 ## Development
 
 To build and run locally (Rust toolchain, Dockerized Postgres, tests, lints), see [docs/dev.md](docs/dev.md). Conventions — commit style, ADRs, code standards — are in [CONTRIBUTING.md](CONTRIBUTING.md).
