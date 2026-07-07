@@ -384,32 +384,42 @@ pub async fn create_saved_query(
     Ok((StatusCode::CREATED, Json(saved_json(&record))))
 }
 
-/// `GET /api/v2/workbench/saved`: list the workspace's saved queries.
+/// `GET /api/v2/workbench/saved`: list the **caller's own** saved queries.
 pub async fn list_saved_queries(
     State(state): State<AppState>,
-    Extension(_principal): Extension<Principal>,
+    Extension(principal): Extension<Principal>,
 ) -> Result<Json<Value>, ApiError> {
-    let records =
-        workbench::list_saved_queries(&state.pool, tenancy::default_workspace_id()).await?;
+    let records = workbench::list_saved_queries(
+        &state.pool,
+        tenancy::default_workspace_id(),
+        &principal.audit_string(),
+    )
+    .await?;
     let items: Vec<Value> = records.iter().map(saved_json).collect();
     Ok(Json(json!({ "saved_queries": items })))
 }
 
-/// `GET /api/v2/workbench/saved/{id}`: load one saved query.
+/// `GET /api/v2/workbench/saved/{id}`: load one of the caller's own saved
+/// queries (another principal's query reads as 404, not their SQL).
 pub async fn get_saved_query(
     State(state): State<AppState>,
-    Extension(_principal): Extension<Principal>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let record = workbench::get_saved_query(&state.pool, tenancy::default_workspace_id(), &id)
-        .await?
-        .ok_or_else(|| {
-            ApiError::new(
-                StatusCode::NOT_FOUND,
-                "NotFound",
-                format!("no saved query {id}"),
-            )
-        })?;
+    let record = workbench::get_saved_query(
+        &state.pool,
+        tenancy::default_workspace_id(),
+        &id,
+        &principal.audit_string(),
+    )
+    .await?
+    .ok_or_else(|| {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "NotFound",
+            format!("no saved query {id}"),
+        )
+    })?;
     Ok(Json(saved_json(&record)))
 }
 

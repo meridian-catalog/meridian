@@ -148,33 +148,43 @@ pub async fn create_saved_query(
     Ok(record)
 }
 
-/// Lists a workspace's saved queries, newest first.
+/// Lists a principal's own saved queries, newest first.
+///
+/// Scoped to `owner` (the saving principal's audit string): saved queries carry
+/// the SQL a user parked, so they are private to their owner — a workspace peer
+/// must not enumerate or read them. A workspace-wide/shared listing would be a
+/// separate, explicitly-shared surface.
 pub async fn list_saved_queries(
     pool: &PgPool,
     workspace_id: WorkspaceId,
+    owner: &str,
 ) -> Result<Vec<SavedQuery>> {
     sqlx::query_as(&format!(
         "SELECT {SAVED_COLUMNS} FROM workbench_saved_queries
-         WHERE workspace_id = $1 ORDER BY id DESC"
+         WHERE workspace_id = $1 AND owner = $2 ORDER BY id DESC"
     ))
     .bind(workspace_id.to_string())
+    .bind(owner)
     .fetch_all(pool)
     .await
     .map_err(|e| map_sqlx_error("failed to list saved queries", e))
 }
 
-/// Loads one saved query by id.
+/// Loads one of the principal's own saved queries by id. Scoped to `owner`, so
+/// a query belonging to another principal reads as absent (not another's SQL).
 pub async fn get_saved_query(
     pool: &PgPool,
     workspace_id: WorkspaceId,
     id: &str,
+    owner: &str,
 ) -> Result<Option<SavedQuery>> {
     sqlx::query_as(&format!(
         "SELECT {SAVED_COLUMNS} FROM workbench_saved_queries
-         WHERE workspace_id = $1 AND id = $2"
+         WHERE workspace_id = $1 AND id = $2 AND owner = $3"
     ))
     .bind(workspace_id.to_string())
     .bind(id)
+    .bind(owner)
     .fetch_optional(pool)
     .await
     .map_err(|e| map_sqlx_error("failed to load saved query", e))
@@ -193,11 +203,16 @@ pub async fn delete_saved_query(
         .await
         .map_err(|e| map_sqlx_error("failed to begin saved-query delete", e))?;
 
+    // Owner-scoped: a principal can only delete its own saved query. A delete
+    // targeting another owner's query (or a nonexistent id) returns None ->
+    // 404, never touching another principal's rows.
     let name: Option<String> = sqlx::query_scalar(
-        "DELETE FROM workbench_saved_queries WHERE workspace_id = $1 AND id = $2 RETURNING name",
+        "DELETE FROM workbench_saved_queries
+         WHERE workspace_id = $1 AND id = $2 AND owner = $3 RETURNING name",
     )
     .bind(workspace_id.to_string())
     .bind(id)
+    .bind(principal)
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| map_sqlx_error("failed to delete saved query", e))?;
