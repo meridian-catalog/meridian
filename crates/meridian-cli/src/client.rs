@@ -148,35 +148,33 @@ pub(crate) async fn namespace_list(
 /// `GET /v1/{prefix}/namespaces/{namespace}/tables`.
 pub(crate) async fn table_list(
     server: &str,
+    token: Option<&str>,
     warehouse: &str,
     namespace: &[String],
 ) -> Result<Value, CliError> {
     let ns = encode_namespace(namespace);
-    let response = http_client()?
-        .get(format!(
-            "{}/v1/{warehouse}/namespaces/{ns}/tables",
-            base(server)
-        ))
-        .send()
-        .await?;
+    let request = http_client()?.get(format!(
+        "{}/v1/{warehouse}/namespaces/{ns}/tables",
+        base(server)
+    ));
+    let response = with_token(request, token).send().await?;
     Ok(check(response).await?.json().await?)
 }
 
 /// `GET /v1/{prefix}/namespaces/{namespace}/tables/{table}`.
 pub(crate) async fn table_load(
     server: &str,
+    token: Option<&str>,
     warehouse: &str,
     namespace: &[String],
     table: &str,
 ) -> Result<Value, CliError> {
     let ns = encode_namespace(namespace);
-    let response = http_client()?
-        .get(format!(
-            "{}/v1/{warehouse}/namespaces/{ns}/tables/{table}",
-            base(server)
-        ))
-        .send()
-        .await?;
+    let request = http_client()?.get(format!(
+        "{}/v1/{warehouse}/namespaces/{ns}/tables/{table}",
+        base(server)
+    ));
+    let response = with_token(request, token).send().await?;
     Ok(check(response).await?.json().await?)
 }
 

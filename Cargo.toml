@@ -81,7 +81,7 @@ uuid = { version = "1.11", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # CLI & config
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive", "env"] }
 figment = { version = "0.10", features = ["toml", "env"] }
 
 # HTTP client (CLI -> server, server -> IdP JWKS; rustls so no system OpenSSL

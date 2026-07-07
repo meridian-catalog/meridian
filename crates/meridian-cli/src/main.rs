@@ -695,6 +695,11 @@ enum TableCommand {
         /// Base URL of the Meridian server.
         #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
         server: String,
+
+        /// Bearer token (from --token or the MERIDIAN_TOKEN env var; required
+        /// when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN", env = "MERIDIAN_TOKEN")]
+        token: Option<String>,
     },
 
     /// Show a table's identity, pointer, and key metadata fields.
@@ -710,6 +715,11 @@ enum TableCommand {
         /// Base URL of the Meridian server.
         #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
         server: String,
+
+        /// Bearer token (from --token or the MERIDIAN_TOKEN env var; required
+        /// when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN", env = "MERIDIAN_TOKEN")]
+        token: Option<String>,
     },
 }
 
@@ -732,6 +742,11 @@ enum WarehouseCommand {
         /// Base URL of the Meridian server.
         #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
         server: String,
+
+        /// Bearer token (from --token or the MERIDIAN_TOKEN env var; required
+        /// when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN", env = "MERIDIAN_TOKEN")]
+        token: Option<String>,
     },
 
     /// List registered warehouses.
@@ -739,6 +754,11 @@ enum WarehouseCommand {
         /// Base URL of the Meridian server.
         #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
         server: String,
+
+        /// Bearer token (from --token or the MERIDIAN_TOKEN env var; required
+        /// when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN", env = "MERIDIAN_TOKEN")]
+        token: Option<String>,
     },
 }
 
@@ -1207,6 +1227,11 @@ enum NamespaceCommand {
         /// Base URL of the Meridian server.
         #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
         server: String,
+
+        /// Bearer token (from --token or the MERIDIAN_TOKEN env var; required
+        /// when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN", env = "MERIDIAN_TOKEN")]
+        token: Option<String>,
     },
 
     /// List namespaces, optionally underneath a parent namespace.
@@ -1222,6 +1247,11 @@ enum NamespaceCommand {
         /// Base URL of the Meridian server.
         #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
         server: String,
+
+        /// Bearer token (from --token or the MERIDIAN_TOKEN env var; required
+        /// when the server runs auth.mode = "oidc").
+        #[arg(long, value_name = "TOKEN", env = "MERIDIAN_TOKEN")]
+        token: Option<String>,
     },
 }
 
@@ -1871,16 +1901,18 @@ async fn run_warehouse(command: WarehouseCommand) -> Result<(), CliError> {
             storage_root,
             storage_options,
             server,
+            token,
         } => {
             let options = parse_pairs(&storage_options)?;
             let created =
-                client::warehouse_create(&server, None, &name, &storage_root, &options).await?;
+                client::warehouse_create(&server, token.as_deref(), &name, &storage_root, &options)
+                    .await?;
             let id = created.get("id").and_then(Value::as_str).unwrap_or("?");
             println!("created warehouse {name} (id {id})");
             Ok(())
         }
-        WarehouseCommand::List { server } => {
-            let body = client::warehouse_list(&server, None).await?;
+        WarehouseCommand::List { server, token } => {
+            let body = client::warehouse_list(&server, token.as_deref()).await?;
             let warehouses = body
                 .get("warehouses")
                 .and_then(Value::as_array)
@@ -1920,10 +1952,12 @@ async fn run_namespace(command: NamespaceCommand) -> Result<(), CliError> {
             warehouse,
             properties,
             server,
+            token,
         } => {
             let levels = parse_namespace_arg(&namespace)?;
             let props = parse_pairs(&properties)?;
-            client::namespace_create(&server, None, &warehouse, &levels, &props).await?;
+            client::namespace_create(&server, token.as_deref(), &warehouse, &levels, &props)
+                .await?;
             println!("created namespace {namespace} in warehouse {warehouse}");
             Ok(())
         }
@@ -1931,10 +1965,16 @@ async fn run_namespace(command: NamespaceCommand) -> Result<(), CliError> {
             warehouse,
             parent,
             server,
+            token,
         } => {
             let parent_levels = parent.as_deref().map(parse_namespace_arg).transpose()?;
-            let body =
-                client::namespace_list(&server, None, &warehouse, parent_levels.as_deref()).await?;
+            let body = client::namespace_list(
+                &server,
+                token.as_deref(),
+                &warehouse,
+                parent_levels.as_deref(),
+            )
+            .await?;
             let namespaces = body
                 .get("namespaces")
                 .and_then(Value::as_array)
@@ -1967,9 +2007,10 @@ async fn run_table(command: TableCommand) -> Result<(), CliError> {
             namespace,
             warehouse,
             server,
+            token,
         } => {
             let levels = parse_namespace_arg(&namespace)?;
-            let body = client::table_list(&server, &warehouse, &levels).await?;
+            let body = client::table_list(&server, token.as_deref(), &warehouse, &levels).await?;
             let identifiers = body
                 .get("identifiers")
                 .and_then(Value::as_array)
@@ -2001,6 +2042,7 @@ async fn run_table(command: TableCommand) -> Result<(), CliError> {
             table,
             warehouse,
             server,
+            token,
         } => {
             let mut levels = parse_namespace_arg(&table)?;
             if levels.len() < 2 {
@@ -2009,7 +2051,8 @@ async fn run_table(command: TableCommand) -> Result<(), CliError> {
                 )));
             }
             let name = levels.pop().unwrap_or_default();
-            let body = client::table_load(&server, &warehouse, &levels, &name).await?;
+            let body =
+                client::table_load(&server, token.as_deref(), &warehouse, &levels, &name).await?;
 
             let metadata = body.get("metadata").cloned().unwrap_or(Value::Null);
             let string_at = |value: &Value, key: &str| {
