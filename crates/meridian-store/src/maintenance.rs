@@ -1187,6 +1187,26 @@ fn first_of_month(date: NaiveDate) -> NaiveDate {
     date.with_day(1).unwrap_or(date) // day 1 always exists in every month
 }
 
+/// Deletes idempotency receipts whose TTL lapsed more than a grace period ago.
+///
+/// Idempotency rows are pure transient dedup state with an explicit `expires_at`
+/// (the purpose-built `idempotency_keys_expires_at_idx` exists for exactly this
+/// sweep). Once expired they can no longer be replayed — recall filters on
+/// `expires_at > now()`, and `commit_tables` reclaims an expired row in place on
+/// a same-key retry — so a distinct never-reused key would otherwise linger
+/// forever. A one-hour grace past expiry keeps a row briefly recallable for
+/// operator inspection before it is collected. Returns the number of rows
+/// deleted. Runs on the pool (its own autocommit statement), never inside a
+/// commit transaction.
+pub async fn sweep_expired_idempotency_keys(pool: &PgPool) -> Result<u64> {
+    let result =
+        sqlx::query("DELETE FROM idempotency_keys WHERE expires_at < now() - interval '1 hour'")
+            .execute(pool)
+            .await
+            .map_err(|e| map_sqlx_error("sweep expired idempotency keys", e))?;
+    Ok(result.rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

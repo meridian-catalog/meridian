@@ -911,6 +911,17 @@ pub async fn run_reconciler(pool: PgPool, config: MaintenanceConfig) {
                 if enqueued > 0 {
                     tracing::info!(enqueued, "reconciler enqueued maintenance jobs");
                 }
+                // Piggyback the cheap retention sweep on the reconcile cadence:
+                // collect idempotency receipts whose TTL lapsed so the table
+                // does not grow without bound. A sweep failure is non-fatal (it
+                // retries next pass), so it never blocks reconciliation.
+                match maintenance::sweep_expired_idempotency_keys(&pool).await {
+                    Ok(n) if n > 0 => {
+                        tracing::debug!(deleted = n, "swept expired idempotency keys");
+                    }
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(%error, "idempotency-key sweep failed"),
+                }
                 tokio::time::sleep(interval).await;
             }
             Err(error) => {

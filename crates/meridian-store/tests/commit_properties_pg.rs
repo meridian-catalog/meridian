@@ -307,6 +307,73 @@ fn pg_empty_and_duplicate_commits_are_rejected() {
 }
 
 #[test]
+fn pg_expired_idempotency_key_is_reclaimed_not_poisoned() {
+    let Some(harness) = harness() else { return };
+    runtime().block_on(async {
+        let table = harness
+            .provision_table(0, commit_harness::INITIAL_LOCATION)
+            .await;
+        let key = format!("k-{}", Ulid::new());
+        let op = |v: u64, location: &str| PointerCas {
+            table: table.clone(),
+            expected_version: v,
+            new_metadata_location: location.to_owned(),
+        };
+
+        // First commit records a receipt under `key`.
+        let first = harness
+            .backend
+            .commit_atomic(&[op(0, "s3://v1")], Some(&key))
+            .await
+            .expect("first commit");
+        assert!(!first.replayed, "first commit is not a replay");
+        assert_eq!(harness.pointer(&table).await.version, 1);
+
+        // Force the receipt past its TTL, simulating a retry that arrives after
+        // the 24h window (an automated writer with deterministic keys recovering
+        // after a long outage).
+        sqlx::query(
+            "UPDATE idempotency_keys SET expires_at = now() - interval '1 second'
+             WHERE idempotency_key = $1",
+        )
+        .bind(&key)
+        .execute(&harness.pool)
+        .await
+        .expect("expire receipt");
+
+        // Retrying the SAME key must now RECLAIM the expired row and commit
+        // afresh, not fail permanently with a unique-violation-driven 503.
+        // (The metadata advanced, so this is a genuine new commit at version 1.)
+        let retry = harness
+            .backend
+            .commit_atomic(&[op(1, "s3://v2")], Some(&key))
+            .await
+            .expect("retry with an expired key must succeed, not 503");
+        assert!(!retry.replayed, "an expired receipt is not replayed");
+        assert_eq!(
+            harness.pointer(&table).await.version,
+            2,
+            "the reclaimed-key commit applied"
+        );
+
+        // The receipt row was reclaimed in place (one row for the key, now live).
+        let (count, live): (i64, bool) = sqlx::query_as(
+            "SELECT count(*)::bigint, bool_and(expires_at > now())
+             FROM idempotency_keys WHERE idempotency_key = $1",
+        )
+        .bind(&key)
+        .fetch_one(&harness.pool)
+        .await
+        .expect("count receipts");
+        assert_eq!(
+            count, 1,
+            "the expired row is reclaimed in place, not duplicated"
+        );
+        assert!(live, "the reclaimed receipt carries a fresh TTL");
+    });
+}
+
+#[test]
 fn pg_unknown_table_is_reported() {
     let Some(harness) = harness() else { return };
     runtime().block_on(async {

@@ -435,17 +435,34 @@ impl PostgresCommitBackend {
             replayed: false,
         };
 
-        // Idempotency receipt, in this same transaction (§3 step 10). A
-        // unique violation means a same-key commit on a *disjoint* table set
-        // won the race (same-table racers serialize on the row lock and were
-        // caught by the in-transaction check above): roll back and resolve
-        // against the winner's recorded receipt.
+        // Idempotency receipt, in this same transaction (§3 step 10). This is a
+        // reclaim-or-detect upsert:
+        //   * no row for the key       → INSERT wins, we claim it;
+        //   * an EXPIRED row exists     → DO UPDATE overwrites it (its TTL
+        //     lapsed, so it can no longer be replayed on recall and must not
+        //     poison this fresh commit) — `rows_affected == 1`;
+        //   * a LIVE row exists         → the WHERE fails, nothing is written,
+        //     `rows_affected == 0`: a same-key commit on a *disjoint* table set
+        //     won the race (same-table racers serialize on the row lock and
+        //     were caught by the in-transaction check above), so roll back and
+        //     resolve against the winner's recorded receipt.
+        // Postgres serializes concurrent racers on the conflicting key's row
+        // lock, so the LIVE-vs-EXPIRED decision is made against committed state.
+        // Without the reclaim path, a retry with a key whose receipt had
+        // expired would unique-violate forever (permanent 503) and expired
+        // rows would accumulate unbounded (they are swept by maintenance).
         if let Some((key, fingerprint)) = idempotency {
             let insert = sqlx::query(
                 "INSERT INTO idempotency_keys
                      (workspace_id, idempotency_key, request_hash, response_status,
                       response_body, expires_at)
-                 VALUES ($1, $2, $3, 200, $4, now() + make_interval(hours => $5))",
+                 VALUES ($1, $2, $3, 200, $4, now() + make_interval(hours => $5))
+                 ON CONFLICT (workspace_id, idempotency_key) DO UPDATE SET
+                     request_hash = EXCLUDED.request_hash,
+                     response_status = EXCLUDED.response_status,
+                     response_body = EXCLUDED.response_body,
+                     expires_at = EXCLUDED.expires_at
+                 WHERE idempotency_keys.expires_at <= now()",
             )
             .bind(self.workspace_id.to_string())
             .bind(key)
@@ -454,20 +471,24 @@ impl PostgresCommitBackend {
             .bind(RECEIPT_TTL_HOURS)
             .execute(&mut *tx)
             .await;
-            if let Err(error) = insert {
-                let unique = error
-                    .as_database_error()
-                    .is_some_and(sqlx::error::DatabaseError::is_unique_violation);
-                // Roll back: nothing from this attempt applies. The failed
-                // statement already poisoned the transaction, so a rollback
-                // error only means the connection is going away with it.
-                if let Err(rollback_error) = tx.rollback().await {
-                    tracing::warn!(%rollback_error, "rollback after receipt conflict failed");
-                }
-                if unique {
+            match insert {
+                // A live receipt already exists (disjoint-table race): roll back
+                // this attempt and replay/reject against the winner.
+                Ok(result) if result.rows_affected() == 0 => {
+                    if let Err(rollback_error) = tx.rollback().await {
+                        tracing::warn!(%rollback_error, "rollback after receipt conflict failed");
+                    }
                     return self.resolve_key_race(key, fingerprint).await;
                 }
-                return Err(unavailable(error));
+                // Claimed a fresh key or reclaimed an expired one: fall through
+                // to commit.
+                Ok(_) => {}
+                Err(error) => {
+                    if let Err(rollback_error) = tx.rollback().await {
+                        tracing::warn!(%rollback_error, "rollback after receipt write failed");
+                    }
+                    return Err(unavailable(error));
+                }
             }
         }
 
