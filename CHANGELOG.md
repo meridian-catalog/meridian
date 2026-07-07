@@ -65,8 +65,62 @@ releases begin, the project will adhere to
   the operator-facing audit detail only, so a prompt cannot learn that restricted
   columns exist.
 
+### Fixed — production readiness (customer-ready pass)
+
+From a comprehensive, adversarially-verified audit ahead of customer use.
+Correctness and data-safety:
+
+- **Branch-catalog writes could hit `main` (data loss).** Every mutating IRC
+  verb except single-table commit and loadTable stripped the `@branch` suffix
+  and resolved the base warehouse, so a drop/create/rename/register, multi-table
+  transaction, or namespace/view mutation addressed to `warehouse@branch`
+  silently mutated `main`. These verbs now fail closed with
+  `400 UnsupportedOperationException` on a branch prefix until per-verb branch
+  routing lands.
+- **Rollback produced an unsorted snapshot log** (regressing timestamps) that
+  the Iceberg Java reader rejects, making the table unreadable from JVM engines;
+  the log is now kept non-decreasing.
+- **An expired idempotency key permanently `503`'d retries** and grew the table
+  without bound; the receipt write is now a reclaim-or-detect upsert, plus a
+  periodic sweep of expired keys.
+
+Reliability and operations:
+
+- **Object-store operations are now bounded by a timeout** (opendal had none), so
+  a hung store no longer stalls commits indefinitely.
+- **Maintenance jobs orphaned in `running` by a crashed worker are reclaimed**
+  after a lease (they blocked a table's future maintenance forever), and a
+  re-queued job now backs off (`run_after`) instead of spinning the worker.
+- **Federation mirror sync is lease-guarded** against a second worker
+  double-syncing an actively-syncing mirror.
+- **Liveness vs readiness split:** `/healthz` is now liveness (always `200`
+  while serving; a DB outage no longer crashloops the fleet) and `/readyz` is
+  readiness (`503` on DB down). CORS now allows `PATCH`. The connection pool
+  default is larger with connection recycling for clean recovery after a
+  Postgres failover.
+- **Sidecar** no longer `500`s on deeply nested SQL (`RecursionError` is caught).
+
+Security:
+
+- **Share bearer tokens are redacted from request logs** (they ride in the URL
+  path and were logged verbatim).
+- **Workbench saved queries are owner-scoped** (were readable/deletable by any
+  authenticated principal).
+
+Performance and tooling:
+
+- **Audit query API** gains composite indexes for principal/action/resource
+  filters.
+- **The CLI can authenticate**: `warehouse`/`namespace`/`table` commands gained
+  `--token` / `MERIDIAN_TOKEN` (they hardcoded no token and were unusable in
+  `oidc` mode).
+
 ### Added
 
+- **Production deployment guide** (`docs/deployment.md`): turning on OIDC auth
+  with a bootstrap admin, TLS at a reverse proxy, PostgreSQL sizing / backup /
+  restore, the liveness–readiness probe split, forward-only migration upgrades,
+  observability, and a configuration reference.
 - **Branching & Data CI/CD — catalog branching every engine can consume**
   (Pillar K, K-F1/K-F2/K-F3). A **catalog branch** is a named, zero-copy overlay
   of the per-table pointer map: it shares main's metadata until a table diverges,
