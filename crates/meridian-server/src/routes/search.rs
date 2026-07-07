@@ -169,18 +169,29 @@ pub async fn search(
     )
     .await?;
 
-    // Fold the composite quality score onto table hits (E-F6). The page is
-    // bounded (≤100), so this is at most 100 cheap single-row reads — the
-    // "wire into search rank if cheap" the brief calls for, surfaced on the
-    // result rather than reordering (reordering would break the FTS keyset
-    // pagination contract). A scoring error on one hit degrades that hit's
-    // score to absent, never failing the whole search.
+    // Fold the composite quality score onto table hits (E-F6) in ONE batch of
+    // grouped queries instead of four per table (the search N+1). The score is
+    // surfaced on the result, not used to reorder (reordering would break the
+    // FTS keyset pagination contract). A batch error leaves scores absent (the
+    // map is empty), exactly as a per-hit error did, and never fails the search.
+    let table_ids: Vec<String> = page
+        .hits
+        .iter()
+        .filter(|h| matches!(h.kind, SearchAssetKind::Table))
+        .map(|h| h.id.clone())
+        .collect();
+    let scores = quality_score::score_for_search_batch(
+        &state.pool,
+        tenancy::default_workspace_id(),
+        &table_ids,
+    )
+    .await
+    .unwrap_or_default();
+
     let mut results = Vec::with_capacity(page.hits.len());
     for hit in page.hits {
         let quality_score = if matches!(hit.kind, SearchAssetKind::Table) {
-            quality_score::score_for_search(&state.pool, tenancy::default_workspace_id(), &hit.id)
-                .await
-                .ok()
+            scores.get(&hit.id).copied()
         } else {
             None
         };

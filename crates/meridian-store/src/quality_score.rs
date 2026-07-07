@@ -45,6 +45,13 @@ type PropsRow = (
     Option<String>,
 );
 
+/// A `(id, properties, schema_text)` row for the batched search-score path.
+type IdPropsRow = (
+    String,
+    sqlx::types::Json<std::collections::BTreeMap<String, String>>,
+    Option<String>,
+);
+
 // ===========================================================================
 // Weights
 // ===========================================================================
@@ -388,6 +395,100 @@ pub async fn score_for_search(
     // Table-bound only (no namespace chain) — cheap enough for every result.
     let inputs = gather_inputs(pool, workspace_id, table_id, &[]).await?;
     Ok(compute(&inputs).score)
+}
+
+/// Batched [`score_for_search`] for a whole page of table hits.
+///
+/// [`score_for_search`] runs four table-bound queries; called per result on a
+/// 100-hit page that is 400 round trips (the search N+1). This computes the same
+/// table-bound scores for every id in a **fixed four** grouped queries and
+/// returns a map from table id to score. A table with no signals is omitted from
+/// the map (score it neutral, 50, at the call site — matching the single-table
+/// path, which returns a neutral score for a table with no signals).
+pub async fn score_for_search_batch(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    table_ids: &[String],
+) -> Result<std::collections::HashMap<String, u8>> {
+    use std::collections::HashMap;
+
+    if table_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let ws = workspace_id.to_string();
+
+    // 1. Table-bound enabled monitor counts, grouped by table.
+    let monitor_rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT securable_id, COUNT(*) FROM monitors
+         WHERE workspace_id = $1 AND enabled = TRUE
+           AND bound_to = 'table' AND securable_id = ANY($2)
+         GROUP BY securable_id",
+    )
+    .bind(&ws)
+    .bind(table_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| map_sqlx_error("failed to batch monitor counts for search score", e))?;
+    let monitors: HashMap<String, i64> = monitor_rows.into_iter().collect();
+
+    // 2. Live-incident tallies (total + freshness), grouped by table.
+    let incident_rows: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT table_id,
+                COUNT(*) AS live,
+                COUNT(*) FILTER (WHERE kind = 'freshness') AS freshness
+         FROM incidents
+         WHERE workspace_id = $1 AND table_id = ANY($2) AND status <> 'resolved'
+         GROUP BY table_id",
+    )
+    .bind(&ws)
+    .bind(table_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| map_sqlx_error("failed to batch incident counts for search score", e))?;
+    let incidents: HashMap<String, (i64, i64)> = incident_rows
+        .into_iter()
+        .map(|(t, live, fresh)| (t, (live, fresh)))
+        .collect();
+
+    // 3. Table-bound enabled contract modes, aggregated per table.
+    let contract_rows: Vec<(String, Vec<String>)> = sqlx::query_as(
+        "SELECT securable_id, array_agg(mode) FROM contracts
+         WHERE workspace_id = $1 AND enabled = TRUE
+           AND bound_to = 'table' AND securable_id = ANY($2)
+         GROUP BY securable_id",
+    )
+    .bind(&ws)
+    .bind(table_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| map_sqlx_error("failed to batch contract modes for search score", e))?;
+    let contracts: HashMap<String, Vec<String>> = contract_rows.into_iter().collect();
+
+    // 4. Ownership/docs properties, per table.
+    let prop_rows: Vec<IdPropsRow> =
+        sqlx::query_as("SELECT id, properties, schema_text FROM tables WHERE id = ANY($1)")
+            .bind(table_ids)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| map_sqlx_error("failed to batch table props for search score", e))?;
+
+    let mut out = HashMap::with_capacity(prop_rows.len());
+    for (id, props, schema_text) in prop_rows {
+        let (live_incidents, live_freshness_incidents) =
+            incidents.get(&id).copied().unwrap_or((0, 0));
+        let contract_mode = contracts.get(&id).and_then(|modes| strongest_mode(modes));
+        let inputs = ScoreInputs {
+            monitor_count: monitors.get(&id).copied().unwrap_or(0),
+            live_incidents,
+            live_freshness_incidents,
+            contract_mode,
+            has_owner: props.0.get("owner").is_some_and(|v| !v.trim().is_empty()),
+            has_table_doc: props.0.get("comment").is_some_and(|v| !v.trim().is_empty()),
+            column_doc_ratio: column_doc_ratio_from_search_text(schema_text.as_deref()),
+        };
+        out.insert(id, compute(&inputs).score);
+    }
+    Ok(out)
 }
 
 impl QualityScore {
