@@ -69,7 +69,8 @@ use crate::AppState;
 use crate::error::ApiError;
 use crate::routes::grants::{namespace_scope_chain, require, require_management};
 use crate::routes::namespaces::{
-    decode_namespace_param, next_page_token, resolve_pagination, resolve_warehouse,
+    decode_namespace_param, next_page_token, reject_branch_prefix, resolve_pagination,
+    resolve_warehouse,
 };
 use crate::sidecar::{SidecarClient, TranspileStatus};
 
@@ -891,6 +892,7 @@ pub async fn create_view(
     Path((prefix, raw_namespace)): Path<(String, String)>,
     Json(request): Json<CreateViewRequest>,
 ) -> Result<Response, ApiError> {
+    reject_branch_prefix(&prefix)?;
     let ctx = resolve_namespace(&state, &prefix, &raw_namespace).await?;
     let chain = namespace_scope_chain(&state.pool, &ctx.warehouse.id, &ctx.levels).await?;
     require(
@@ -1104,6 +1106,7 @@ pub async fn drop_view(
     Extension(principal): Extension<Principal>,
     Path((prefix, raw_namespace, name)): Path<(String, String, String)>,
 ) -> Result<StatusCode, ApiError> {
+    reject_branch_prefix(&prefix)?;
     let warehouse = resolve_warehouse(&state.pool, &prefix).await?;
     let levels = decode_namespace_param(&raw_namespace)?;
     require_on_view(
@@ -1151,6 +1154,7 @@ pub async fn replace_view(
     Path((prefix, raw_namespace, name)): Path<(String, String, String)>,
     Json(body): Json<Value>,
 ) -> Result<Response, ApiError> {
+    reject_branch_prefix(&prefix)?;
     let warehouse = resolve_warehouse(&state.pool, &prefix).await?;
     let levels = decode_namespace_param(&raw_namespace)?;
     validate_view_name(&name)?;
@@ -1298,6 +1302,7 @@ pub async fn rename_view(
     Path(prefix): Path<String>,
     Json(request): Json<RenameViewRequest>,
 ) -> Result<StatusCode, ApiError> {
+    reject_branch_prefix(&prefix)?;
     let warehouse = resolve_warehouse(&state.pool, &prefix).await?;
     validate_view_name(&request.destination.name)?;
     if request.source.namespace.is_empty() || request.destination.namespace.is_empty() {

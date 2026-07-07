@@ -113,6 +113,33 @@ pub(crate) async fn resolve_catalog_ref(
     Ok((warehouse, CatalogRef::Branch(Box::new(record))))
 }
 
+/// Rejects a **mutating** IRC request addressed to a `warehouse@branch` prefix.
+///
+/// Branch-as-catalog (K-F2) is wired for reads (`load_table`) and single-table
+/// commits (`commit_table`), which resolve the branch pointer explicitly. The
+/// other mutating verbs — create/drop/rename/register table, multi-table
+/// `transactions/commit`, and namespace and view mutations — are **not**
+/// branch-aware yet: they resolve the base warehouse via [`resolve_warehouse`]
+/// / [`resolve_namespace`], so a write addressed to a branch prefix would
+/// otherwise silently mutate `main` (data loss behind the "isolated branch"
+/// illusion). Fail closed with a clear 400 until per-verb branch routing lands.
+/// A plain warehouse prefix (no `@`) always passes.
+pub(crate) fn reject_branch_prefix(prefix: &str) -> Result<(), ApiError> {
+    if let (_base, Some(branch)) = split_prefix(prefix) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "UnsupportedOperationException",
+            format!(
+                "operation not supported on branch catalog '{prefix}': only \
+                 table load and single-table commit are branch-aware today. \
+                 Target the base warehouse, or commit to the branch one table \
+                 at a time (branch '{branch}')."
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Validates namespace levels: at least one level, no empty level, no level
 /// containing the unit separator (it could never be addressed in a URL).
 fn validate_levels(levels: &[String]) -> Result<(), ApiError> {
@@ -317,6 +344,7 @@ pub async fn create_namespace(
     Path(prefix): Path<String>,
     Json(request): Json<CreateNamespaceRequest>,
 ) -> Result<Json<NamespaceResponse>, ApiError> {
+    reject_branch_prefix(&prefix)?;
     let wh = resolve_warehouse(&state.pool, &prefix).await?;
     require(
         &state.pool,
@@ -410,6 +438,7 @@ pub async fn drop_namespace(
     Extension(principal): Extension<Principal>,
     Path((prefix, raw_namespace)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
+    reject_branch_prefix(&prefix)?;
     let wh = resolve_warehouse(&state.pool, &prefix).await?;
     let levels = decode_namespace_param(&raw_namespace)?;
     let chain = namespace_scope_chain(&state.pool, &wh.id, &levels).await?;
@@ -469,6 +498,7 @@ pub async fn update_namespace_properties(
     Path((prefix, raw_namespace)): Path<(String, String)>,
     Json(request): Json<UpdateNamespacePropertiesRequest>,
 ) -> Result<Json<UpdateNamespacePropertiesResponse>, ApiError> {
+    reject_branch_prefix(&prefix)?;
     let wh = resolve_warehouse(&state.pool, &prefix).await?;
     let levels = decode_namespace_param(&raw_namespace)?;
     let chain = namespace_scope_chain(&state.pool, &wh.id, &levels).await?;

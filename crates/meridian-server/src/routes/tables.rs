@@ -92,7 +92,8 @@ use crate::AppState;
 use crate::error::ApiError;
 use crate::routes::grants::{namespace_scope_chain, require};
 use crate::routes::namespaces::{
-    decode_namespace_param, next_page_token, resolve_pagination, resolve_warehouse,
+    decode_namespace_param, next_page_token, reject_branch_prefix, resolve_pagination,
+    resolve_warehouse,
 };
 use crate::routes::signing::remote_signing_config;
 use crate::routes::vending::{
@@ -852,6 +853,7 @@ pub async fn create_table(
     headers: HeaderMap,
     Json(request): Json<CreateTableRequest>,
 ) -> Result<Response, ApiError> {
+    reject_branch_prefix(&prefix)?;
     let delegation = requested_delegation(&headers)?;
     let ctx = resolve_namespace(&state, &prefix, &raw_namespace).await?;
     let chain = namespace_scope_chain(&state.pool, &ctx.warehouse.id, &ctx.levels).await?;
@@ -1206,6 +1208,7 @@ pub async fn drop_table(
     Path((prefix, raw_namespace, name)): Path<(String, String, String)>,
     Query(query): Query<DropTableQuery>,
 ) -> Result<StatusCode, ApiError> {
+    reject_branch_prefix(&prefix)?;
     let warehouse = resolve_warehouse(&state.pool, &prefix).await?;
     let levels = decode_namespace_param(&raw_namespace)?;
     // The table record joins the scope when the table exists; a caller denied
@@ -1275,6 +1278,7 @@ pub async fn rename_table(
     Path(prefix): Path<String>,
     Json(request): Json<RenameTableRequest>,
 ) -> Result<StatusCode, ApiError> {
+    reject_branch_prefix(&prefix)?;
     let warehouse = resolve_warehouse(&state.pool, &prefix).await?;
     validate_table_name(&request.destination.name)?;
     if request.source.namespace.is_empty() || request.destination.namespace.is_empty() {
@@ -1357,6 +1361,7 @@ pub async fn register_table(
     Path((prefix, raw_namespace)): Path<(String, String)>,
     Json(request): Json<RegisterTableRequest>,
 ) -> Result<Response, ApiError> {
+    reject_branch_prefix(&prefix)?;
     let ctx = resolve_namespace(&state, &prefix, &raw_namespace).await?;
     let chain = namespace_scope_chain(&state.pool, &ctx.warehouse.id, &ctx.levels).await?;
     require(
@@ -2464,6 +2469,7 @@ pub async fn commit_transaction(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Response, ApiError> {
+    reject_branch_prefix(&prefix)?;
     let warehouse = resolve_warehouse(&state.pool, &prefix).await?;
 
     let changes_raw = body

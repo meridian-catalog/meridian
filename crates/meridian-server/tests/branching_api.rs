@@ -334,6 +334,115 @@ async fn branch_commit_advances_branch_and_leaves_main_unchanged() {
 }
 
 // ===========================================================================
+// K-F2 safety: non-branch-aware mutating verbs are REJECTED on a branch prefix
+// (they resolve the base warehouse, so without the guard they would silently
+// mutate main — data loss behind the "isolated branch" illusion).
+// ===========================================================================
+
+#[tokio::test]
+async fn branch_prefix_rejects_non_commit_mutations_leaving_main_intact() {
+    let Some(ctx) = test_ctx().await else { return };
+    make_namespace(&ctx, "db").await;
+    let uuid = make_table(&ctx, "db", "t").await;
+    let branch = format!("dev-{}", ctx.salt);
+    create_branch(&ctx, &branch).await;
+
+    let (main_loc_before, main_ver_before) = main_pointer(&ctx, &uuid).await;
+    let wh = &ctx.warehouse;
+
+    // (method, path, body) for each non-branch-aware write verb, addressed at
+    // the branch-as-catalog prefix. Every one must be refused, not silently
+    // applied to main.
+    let cases: Vec<(&str, String, Option<Value>)> = vec![
+        // drop table (with purge — the most destructive: would delete the main row)
+        (
+            "DELETE",
+            format!("/v1/{wh}@{branch}/namespaces/db/tables/t?purgeRequested=true"),
+            None,
+        ),
+        // create table
+        (
+            "POST",
+            format!("/v1/{wh}@{branch}/namespaces/db/tables"),
+            Some(json!({ "name": "created_on_branch", "schema": {
+                "type": "struct", "schema-id": 0,
+                "fields": [{ "id": 1, "name": "id", "required": true, "type": "long" }]
+            }})),
+        ),
+        // rename table
+        (
+            "POST",
+            format!("/v1/{wh}@{branch}/tables/rename"),
+            Some(json!({
+                "source": { "namespace": ["db"], "name": "t" },
+                "destination": { "namespace": ["db"], "name": "renamed" }
+            })),
+        ),
+        // multi-table transaction (would commit straight to main pointers)
+        (
+            "POST",
+            format!("/v1/{wh}@{branch}/transactions/commit"),
+            Some(json!({ "table-changes": [] })),
+        ),
+        // create namespace
+        (
+            "POST",
+            format!("/v1/{wh}@{branch}/namespaces"),
+            Some(json!({ "namespace": ["branch_ns"] })),
+        ),
+        // drop namespace
+        ("DELETE", format!("/v1/{wh}@{branch}/namespaces/db"), None),
+        // create view
+        (
+            "POST",
+            format!("/v1/{wh}@{branch}/namespaces/db/views"),
+            Some(json!({ "name": "v", "schema": {
+                "type": "struct", "schema-id": 0, "fields": []
+            }, "view-version": {
+                "version-id": 1, "timestamp-ms": 0, "schema-id": 0,
+                "summary": {}, "default-namespace": ["db"],
+                "representations": [{ "type": "sql", "sql": "SELECT 1", "dialect": "spark" }]
+            }})),
+        ),
+    ];
+
+    for (method, path, body) in cases {
+        let (status, resp) = send(&ctx.router, method, &path, None, body).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{method} {path} on a branch prefix must be rejected, got {status}: {resp}"
+        );
+        assert_eq!(
+            resp["error"]["type"], "UnsupportedOperationException",
+            "branch-prefix rejection must be UnsupportedOperationException: {resp}"
+        );
+    }
+
+    // main is byte-for-byte untouched by every rejected verb.
+    let (main_loc_after, main_ver_after) = main_pointer(&ctx, &uuid).await;
+    assert_eq!(
+        (main_loc_before, main_ver_before),
+        (main_loc_after, main_ver_after),
+        "no rejected branch-prefix write may mutate main"
+    );
+    // the table the drop targeted still exists on main.
+    let (status, _) = send(
+        &ctx.router,
+        "GET",
+        &main_table_url(&ctx, "db", "t"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "main table must survive the rejected branch drop"
+    );
+}
+
+// ===========================================================================
 // K-F2: branch-as-catalog isolation (branch load vs main load)
 // ===========================================================================
 

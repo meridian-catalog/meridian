@@ -163,8 +163,20 @@ so the suffix is unambiguous. `/v1/config?warehouse=warehouse@dev` also resolves
 that bootstrap via `config` get the branch prefix wired into their catalog automatically.
 
 This is the trick that makes catalog branching universally consumable: **no engine needs a
-branching API**. Spark, Trino, Snowflake-CLD, DuckDB, PyIceberg — all read/write a branch by
-pointing at `warehouse@branch`.
+branching API**. Spark, Trino, Snowflake-CLD, DuckDB, PyIceberg — all read a branch, and
+write a branch **one table at a time**, by pointing at `warehouse@branch`.
+
+**Scope today (fail-closed).** Branch routing is wired on exactly the two verbs that resolve
+the branch pointer explicitly: `loadTable` (returns the branch head) and single-table
+`commit` (advances the branch pointer, leaving main untouched). Every *other* mutating IRC
+verb — `createTable`, `dropTable`, `renameTable`, `registerTable`, the multi-table
+`transactions/commit`, and all namespace and view mutations — is **not** branch-aware yet: it
+resolves the base warehouse. Rather than let such a request silently mutate `main` behind the
+"isolated branch" illusion, the server **rejects it with `400 UnsupportedOperationException`**
+when the prefix carries an `@branch` suffix (`reject_branch_prefix`, enforced in every such
+handler and covered by `branching_api.rs`). Per-verb branch routing for these operations is
+future work (§9); until it lands, do branch-isolated table evolution through single-table
+commits, and use the base warehouse for structural changes.
 
 ## 5. Diff (K-F1)
 
