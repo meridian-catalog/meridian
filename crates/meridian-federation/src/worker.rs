@@ -3,8 +3,9 @@
 //!
 //! [`run_worker`] is spawned by `meridian serve` exactly like the maintenance
 //! and events workers: a claim-run-repeat loop that finds mirrors whose
-//! `sync_interval` has elapsed (or which a `sync_now` marked `running`) and
-//! syncs them one at a time, recording each run's outcome. It never returns and
+//! `sync_interval` has elapsed (or whose prior `running` claim went stale past
+//! the lease, i.e. a crashed worker) and syncs them one at a time, recording
+//! each run's outcome. It never returns and
 //! never panics — a sync failure is recorded on the mirror and the loop
 //! continues.
 //!
@@ -47,8 +48,9 @@ pub async fn run_worker(pool: PgPool, config: FederationConfig) {
         poll_interval_secs = config.poll_interval_secs,
         "federation sync worker started"
     );
+    let sync_lease_secs = i64::try_from(config.sync_lease_secs).unwrap_or(i64::MAX);
     loop {
-        match sync_next_due(&pool, workspace, request_timeout).await {
+        match sync_next_due(&pool, workspace, request_timeout, sync_lease_secs).await {
             Ok(true) => {
                 // Synced one; more may be due — keep going without sleeping.
                 error_delay = Duration::from_secs(1);
@@ -74,8 +76,9 @@ async fn sync_next_due(
     pool: &PgPool,
     workspace: WorkspaceId,
     request_timeout: Duration,
+    sync_lease_secs: i64,
 ) -> Result<bool, meridian_common::MeridianError> {
-    let Some(mirror) = claim_due_mirror(pool, workspace).await? else {
+    let Some(mirror) = claim_due_mirror(pool, workspace, sync_lease_secs).await? else {
         return Ok(false);
     };
     run_and_record(pool, workspace, &mirror, request_timeout).await;
@@ -85,17 +88,26 @@ async fn sync_next_due(
 /// Claims the next due, enabled mirror by marking it `running` with a guarded
 /// update (so two workers cannot claim the same mirror), and returns it.
 ///
-/// "Due" = enabled AND (never synced, OR older than its `sync_interval`, OR
-/// already flagged `running` — the `sync_now` trigger, or a crashed prior run
-/// whose `running` flag we reclaim). Oldest first.
+/// "Due" = enabled AND (never synced, OR older than its `sync_interval`, OR a
+/// **stale** `running` claim past the lease — a crashed prior run we reclaim).
+/// Oldest first. A fresh `running` claim (a worker actively syncing) is not due,
+/// so a second worker cannot double-sync it. (Manual `sync_now` does not use
+/// this path; it syncs the named mirror directly.)
 async fn claim_due_mirror(
     pool: &PgPool,
     workspace: WorkspaceId,
+    sync_lease_secs: i64,
 ) -> Result<Option<MirrorRecord>, meridian_common::MeridianError> {
     // One statement claims and returns the mirror: the `UPDATE ... WHERE id IN
     // (SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1)` pattern is the same
     // single-claim discipline the maintenance queue uses, so concurrent workers
-    // never claim the same row.
+    // never claim the same row *at the same instant*. But the claim commits and
+    // releases the row lock before the (potentially long) sync runs, so a
+    // `running` mirror must NOT be treated as immediately due — otherwise a
+    // second worker (another replica, or the scheduler racing a manual
+    // `sync now`) claims and double-syncs it. A `running` mirror is reclaimable
+    // only once its `updated_at` is older than the lease (crash recovery),
+    // which the claim itself refreshes.
     let record: Option<MirrorRecord> = sqlx::query_as(
         "UPDATE catalog_mirrors m
          SET last_sync_status = 'running', updated_at = now()
@@ -105,7 +117,8 @@ async fn claim_due_mirror(
                AND enabled = TRUE
                AND (
                    last_synced_at IS NULL
-                   OR last_sync_status = 'running'
+                   OR (last_sync_status = 'running'
+                       AND updated_at < now() - make_interval(secs => $2::double precision))
                    OR last_synced_at < now() - make_interval(secs => sync_interval_s)
                )
              ORDER BY last_synced_at ASC NULLS FIRST
@@ -117,6 +130,7 @@ async fn claim_due_mirror(
                    last_sync_detail, asset_count, created_at, updated_at",
     )
     .bind(workspace.to_string())
+    .bind(sync_lease_secs)
     .fetch_optional(pool)
     .await
     .map_err(|e| meridian_common::MeridianError::internal("failed to claim due mirror", e))?;

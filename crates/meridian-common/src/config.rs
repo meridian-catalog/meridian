@@ -170,6 +170,15 @@ pub struct FederationConfig {
     /// bounds each `GET /v1/config` / list / `loadTable` call so an
     /// unresponsive source cannot stall a sync run indefinitely.
     pub request_timeout_secs: u64,
+    /// Lease deadline in seconds for a mirror claimed for sync (its status is
+    /// `running`). A worker that crashes mid-sync leaves the mirror `running`;
+    /// this reclaims it only after `updated_at` is older than the lease, so a
+    /// second worker (another replica, or the scheduler racing a manual
+    /// `sync now`) does not double-sync a mirror that is actively being synced.
+    /// Set above the longest legitimate sync run; a sync is idempotent
+    /// (mirror rows are upserted), so a rare double-run is wasteful, not
+    /// corrupting.
+    pub sync_lease_secs: u64,
 }
 
 impl Default for FederationConfig {
@@ -178,6 +187,7 @@ impl Default for FederationConfig {
             enabled: true,
             poll_interval_secs: 60,
             request_timeout_secs: 30,
+            sync_lease_secs: 900,
         }
     }
 }
