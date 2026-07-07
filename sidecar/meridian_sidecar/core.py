@@ -39,7 +39,11 @@ def _parses(sql: str, dialect: str) -> bool:
     """True if ``sql`` parses cleanly in ``dialect`` (the parse-back check)."""
     try:
         parsed = sqlglot.parse(sql, read=dialect)
-    except SqlglotError:
+    except (SqlglotError, RecursionError):
+        # RecursionError: SQLGlot's recursive parser overflows the Python stack
+        # on pathologically nested SQL. It is not a SqlglotError, so it must be
+        # caught explicitly or it escapes as an unhandled 500. Too-deep input
+        # simply does not parse here.
         return False
     return bool(parsed) and all(stmt is not None for stmt in parsed)
 
@@ -62,13 +66,17 @@ def transpile(
 
     try:
         out_statements = sqlglot.transpile(sql, read=from_dialect, write=to_dialect)
-    except SqlglotError as err:
-        # SQLGlot could not handle it. Try the fallback (no-op by default).
+    except (SqlglotError, RecursionError) as err:
+        # SQLGlot could not handle it (RecursionError = its recursive parser
+        # overflowed the Python stack on pathologically nested SQL; not a
+        # SqlglotError, so it must be caught explicitly or it escapes as an
+        # unhandled 500). Try the fallback (no-op by default).
+        error = "input too deeply nested to transpile" if isinstance(err, RecursionError) else str(err)
         return _fallback(
             sql=sql,
             from_dialect=from_dialect,
             to_dialect=to_dialect,
-            error=str(err),
+            error=error,
             llm=llm,
         )
 

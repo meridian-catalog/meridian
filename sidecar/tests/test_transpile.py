@@ -95,3 +95,21 @@ def test_verified_requires_parse_back():
         to_dialect="duckdb",
     )
     assert resp.status == Status.verified
+
+
+def test_deeply_nested_sql_does_not_crash_with_recursionerror():
+    # SQLGlot's recursive parser raises RecursionError (not a SqlglotError) on
+    # pathologically nested SQL. It must be caught, not escape as a 500.
+    depth = 5_000
+    nested = "(" * depth + "SELECT 1" + ")" * depth
+    resp = core.transpile(sql=nested, from_dialect="spark", to_dialect="trino")
+    # Either it transpiles or it is reported unsupported/best-effort — never a
+    # raised exception. The point of the test is that this call returns.
+    assert resp.status in (Status.verified, Status.best_effort, Status.unsupported)
+
+
+def test_deeply_nested_sql_parses_returns_false_not_crash():
+    depth = 5_000
+    nested = "(" * depth + "SELECT 1" + ")" * depth
+    # _parses must swallow RecursionError and return False, not raise.
+    assert core._parses(nested, "trino") in (True, False)
