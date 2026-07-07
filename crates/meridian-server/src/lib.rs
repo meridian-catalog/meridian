@@ -807,7 +807,7 @@ pub fn build_router(state: AppState) -> Router {
                         tracing::info_span!(
                             "http_request",
                             method = %request.method(),
-                            uri = %request.uri(),
+                            uri = %redact_uri_for_log(request.uri()),
                             request_id,
                         )
                     }),
@@ -869,6 +869,30 @@ fn cors_layer(origins: &[String]) -> CorsLayer {
             .filter_map(|o| o.parse::<HeaderValue>().ok())
             .collect();
         base.allow_origin(parsed).allow_credentials(true)
+    }
+}
+
+/// Renders a request URI for logging with any **secret path segment redacted**.
+///
+/// The recipient data-share endpoint carries its bearer token *in the path*
+/// (`/share/{token}/...`). Logging the URI verbatim — as the request tracing
+/// span does for every request — would write a live, reusable credential into
+/// the server logs, where it survives log aggregation and retention. Replace
+/// the token segment with `***`; every other path logs unchanged. Query strings
+/// on these routes do not carry the token, so they are preserved.
+fn redact_uri_for_log(uri: &axum::http::Uri) -> String {
+    let path = uri.path();
+    let rendered = if let Some(rest) = path.strip_prefix("/share/") {
+        match rest.split_once('/') {
+            Some((_token, tail)) => format!("/share/***/{tail}"),
+            None => "/share/***".to_owned(),
+        }
+    } else {
+        path.to_owned()
+    };
+    match uri.query() {
+        Some(query) => format!("{rendered}?{query}"),
+        None => rendered,
     }
 }
 
@@ -1037,5 +1061,40 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => tracing::info!("received ctrl-c, shutting down"),
         () = terminate => tracing::info!("received SIGTERM, shutting down"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_uri_for_log;
+
+    #[test]
+    fn share_token_is_redacted_from_logged_uri() {
+        let cases = [
+            (
+                "/share/sk_live_deadbeef1234/v1/namespaces/db/tables/t",
+                "/share/***/v1/namespaces/db/tables/t",
+            ),
+            ("/share/sk_live_deadbeef1234", "/share/***"),
+            ("/share/sk_live_deadbeef1234/terms", "/share/***/terms"),
+        ];
+        for (input, expected) in cases {
+            let uri = input.parse().expect("uri");
+            assert_eq!(redact_uri_for_log(&uri), expected, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn non_share_uris_and_queries_pass_through() {
+        let uri = "/v1/demo/namespaces/db/tables/t".parse().unwrap();
+        assert_eq!(redact_uri_for_log(&uri), "/v1/demo/namespaces/db/tables/t");
+        // The share token is never in the query, so queries are preserved.
+        let uri = "/v1/config?warehouse=demo".parse().unwrap();
+        assert_eq!(redact_uri_for_log(&uri), "/v1/config?warehouse=demo");
+        let uri = "/share/tok123/v1/namespaces?pageSize=10".parse().unwrap();
+        assert_eq!(
+            redact_uri_for_log(&uri),
+            "/share/***/v1/namespaces?pageSize=10"
+        );
     }
 }
