@@ -238,6 +238,16 @@ pub struct MaintenanceConfig {
     /// metadata-only (drops old snapshots via `remove-snapshots`), but it is
     /// destructive of history, so it has its own switch, default on.
     pub expiry_enabled: bool,
+    /// Lease deadline in seconds for a claimed (`running`) maintenance job. A
+    /// worker that crashes or is `SIGKILL`ed mid-job leaves it `running` with
+    /// no one to finish it, which permanently blocks that table's future
+    /// maintenance (the reconciler debounces on in-flight jobs). The reconciler
+    /// reclaims a `running` job whose `updated_at` is older than this — back to
+    /// `queued` for a retry, or to `failed` once the attempt budget is spent.
+    /// Set comfortably above the longest legitimate job runtime; the
+    /// maintenance commit is optimistic-CAS safe, so a reclaim racing a
+    /// still-alive original loses the commit rather than corrupting anything.
+    pub job_lease_secs: i64,
 }
 
 impl Default for MaintenanceConfig {
@@ -255,6 +265,7 @@ impl Default for MaintenanceConfig {
             reconcile_snapshot_slack: 0,
             expiry_min_snapshots_kept: 1,
             expiry_enabled: true,
+            job_lease_secs: 1_800,
         }
     }
 }

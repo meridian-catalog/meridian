@@ -874,6 +874,61 @@ pub async fn cancel_job(
     row.into_record()
 }
 
+/// One job reclaimed from an expired lease: its id and the state it was moved
+/// to (`queued` for a retry, or `failed` once the attempt budget was spent).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReclaimedJob {
+    /// The job id.
+    pub id: String,
+    /// The state it was moved to (`queued` or `failed`).
+    pub state: String,
+}
+
+/// Reclaims maintenance jobs stuck in `running` past their lease deadline.
+///
+/// A worker that crashes or is `SIGKILL`ed mid-job never transitions its
+/// claimed job, so it sits `running` forever — and because the reconciler
+/// debounces on any in-flight job for a table, that table's future maintenance
+/// is blocked permanently. This resets any `running` job whose `updated_at` is
+/// older than `lease_secs` back to `queued` (so `claim_next` retries it), or to
+/// `failed` once `attempts >= max_attempts` (so a job that reliably kills its
+/// worker cannot loop forever). Runs on the pool as a single statement.
+///
+/// The maintenance commit is optimistic-CAS safe, so if a reclaimed job runs
+/// concurrently with a still-alive original (a false-positive reclaim), one
+/// loses the pointer CAS and re-plans or no-ops — no double apply, no
+/// corruption. Pick `lease_secs` above the longest legitimate job runtime.
+pub async fn reclaim_expired_jobs(
+    pool: &PgPool,
+    lease_secs: i64,
+    max_attempts: i32,
+) -> Result<Vec<ReclaimedJob>> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "UPDATE maintenance_jobs
+         SET state = CASE WHEN attempts >= $2 THEN 'failed' ELSE 'queued' END,
+             claimed_by = NULL,
+             error = CASE WHEN attempts >= $2
+                          THEN jsonb_build_object(
+                                   'reason', 'lease expired; worker did not report back',
+                                   'attempts', attempts)
+                          ELSE error END,
+             finished_at = CASE WHEN attempts >= $2 THEN now() ELSE finished_at END,
+             updated_at = now()
+         WHERE state = 'running'
+           AND updated_at < now() - make_interval(secs => $1::double precision)
+         RETURNING id, state",
+    )
+    .bind(lease_secs)
+    .bind(max_attempts)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| map_sqlx_error("failed to reclaim expired maintenance jobs", e))?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, state)| ReclaimedJob { id, state })
+        .collect())
+}
+
 /// Shared terminal transition for `succeeded`/`failed`, guarded on the job
 /// being `running` and held by the completing worker.
 async fn transition_terminal(

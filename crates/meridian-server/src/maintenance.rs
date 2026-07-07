@@ -911,6 +911,28 @@ pub async fn run_reconciler(pool: PgPool, config: MaintenanceConfig) {
                 if enqueued > 0 {
                     tracing::info!(enqueued, "reconciler enqueued maintenance jobs");
                 }
+                // Reclaim maintenance jobs whose worker went away mid-run and
+                // left them `running` past the lease — otherwise they block the
+                // table's future maintenance forever. Non-fatal on error.
+                match maintenance::reclaim_expired_jobs(
+                    &pool,
+                    config.job_lease_secs,
+                    config.max_job_attempts,
+                )
+                .await
+                {
+                    Ok(reclaimed) if !reclaimed.is_empty() => {
+                        for job in &reclaimed {
+                            tracing::warn!(
+                                job_id = %job.id,
+                                new_state = %job.state,
+                                "reclaimed maintenance job whose lease expired"
+                            );
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(%error, "maintenance job reclaim failed"),
+                }
                 // Piggyback the cheap retention sweep on the reconcile cadence:
                 // collect idempotency receipts whose TTL lapsed so the table
                 // does not grow without bound. A sweep failure is non-fatal (it

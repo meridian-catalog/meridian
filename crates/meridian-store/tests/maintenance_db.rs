@@ -364,6 +364,80 @@ async fn job_lifecycle_queue_claim_complete() {
 }
 
 #[tokio::test]
+async fn expired_lease_reclaims_running_jobs_then_fails_when_budget_spent() {
+    let Some(fx) = fixture().await else { return };
+    let _lock = queue_test_lock().await;
+    reset_queue(&fx.pool).await;
+
+    let job = maintenance::enqueue_job(
+        &fx.pool,
+        fx.workspace,
+        &fx.table_id,
+        JobType::Compaction,
+        None,
+        &json!({"dry_run": false}),
+        "test:maint",
+    )
+    .await
+    .expect("enqueue");
+
+    // A worker claims it (-> running, attempts = 1) then "crashes" (never
+    // transitions it). A fresh claim reclaims NOTHING until the lease expires.
+    let claimed = maintenance::claim_next(&fx.pool, "worker-crash")
+        .await
+        .expect("claim")
+        .expect("queued job");
+    assert_eq!(claimed.state, JobState::Running);
+
+    // Not yet past the lease: no reclaim.
+    let none = maintenance::reclaim_expired_jobs(&fx.pool, 1_800, 3)
+        .await
+        .expect("reclaim");
+    assert!(none.is_empty(), "a fresh running job is within its lease");
+
+    // Backdate updated_at past the lease, simulating a dead worker.
+    sqlx::query("UPDATE maintenance_jobs SET updated_at = now() - interval '1 hour' WHERE id = $1")
+        .bind(&job.id)
+        .execute(&fx.pool)
+        .await
+        .expect("age the job");
+
+    // attempts (1) < max (3): reclaimed back to queued for a retry.
+    let reclaimed = maintenance::reclaim_expired_jobs(&fx.pool, 1_800, 3)
+        .await
+        .expect("reclaim");
+    assert_eq!(reclaimed.len(), 1);
+    assert_eq!(reclaimed[0].id, job.id);
+    assert_eq!(reclaimed[0].state, "queued");
+    // It is claimable again (proving it no longer blocks the table).
+    let reclaimed_claim = maintenance::claim_next(&fx.pool, "worker-2")
+        .await
+        .expect("claim")
+        .expect("reclaimed job is queued again");
+    assert_eq!(reclaimed_claim.id, job.id);
+    assert_eq!(reclaimed_claim.attempts, 2, "attempts advanced on re-claim");
+
+    // Age it again with the attempt budget now spent (attempts = 2, max = 2):
+    // reclaim moves it to failed, not queued, so a worker-killing job cannot
+    // loop forever.
+    sqlx::query("UPDATE maintenance_jobs SET updated_at = now() - interval '1 hour' WHERE id = $1")
+        .bind(&job.id)
+        .execute(&fx.pool)
+        .await
+        .expect("age the job again");
+    let failed = maintenance::reclaim_expired_jobs(&fx.pool, 1_800, 2)
+        .await
+        .expect("reclaim");
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].state, "failed", "budget spent -> failed, not requeued");
+    // No longer claimable.
+    let empty = maintenance::claim_next(&fx.pool, "worker-3")
+        .await
+        .expect("claim");
+    assert!(empty.is_none(), "a failed job is terminal");
+}
+
+#[tokio::test]
 async fn cancel_queued_and_running_jobs() {
     let Some(fx) = fixture().await else { return };
     let _lock = queue_test_lock().await;
