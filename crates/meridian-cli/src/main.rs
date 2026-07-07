@@ -696,8 +696,8 @@ enum TableCommand {
         #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
         server: String,
 
-        /// Bearer token (from --token or the MERIDIAN_TOKEN env var; required
-        /// when the server runs auth.mode = "oidc").
+        /// Bearer token (from `--token` or the `MERIDIAN_TOKEN` env var;
+        /// required when the server runs `auth.mode = "oidc"`).
         #[arg(long, value_name = "TOKEN", env = "MERIDIAN_TOKEN")]
         token: Option<String>,
     },
@@ -716,8 +716,8 @@ enum TableCommand {
         #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
         server: String,
 
-        /// Bearer token (from --token or the MERIDIAN_TOKEN env var; required
-        /// when the server runs auth.mode = "oidc").
+        /// Bearer token (from `--token` or the `MERIDIAN_TOKEN` env var;
+        /// required when the server runs `auth.mode = "oidc"`).
         #[arg(long, value_name = "TOKEN", env = "MERIDIAN_TOKEN")]
         token: Option<String>,
     },
@@ -743,8 +743,8 @@ enum WarehouseCommand {
         #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
         server: String,
 
-        /// Bearer token (from --token or the MERIDIAN_TOKEN env var; required
-        /// when the server runs auth.mode = "oidc").
+        /// Bearer token (from `--token` or the `MERIDIAN_TOKEN` env var;
+        /// required when the server runs `auth.mode = "oidc"`).
         #[arg(long, value_name = "TOKEN", env = "MERIDIAN_TOKEN")]
         token: Option<String>,
     },
@@ -755,8 +755,8 @@ enum WarehouseCommand {
         #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
         server: String,
 
-        /// Bearer token (from --token or the MERIDIAN_TOKEN env var; required
-        /// when the server runs auth.mode = "oidc").
+        /// Bearer token (from `--token` or the `MERIDIAN_TOKEN` env var;
+        /// required when the server runs `auth.mode = "oidc"`).
         #[arg(long, value_name = "TOKEN", env = "MERIDIAN_TOKEN")]
         token: Option<String>,
     },
@@ -1228,8 +1228,8 @@ enum NamespaceCommand {
         #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
         server: String,
 
-        /// Bearer token (from --token or the MERIDIAN_TOKEN env var; required
-        /// when the server runs auth.mode = "oidc").
+        /// Bearer token (from `--token` or the `MERIDIAN_TOKEN` env var;
+        /// required when the server runs `auth.mode = "oidc"`).
         #[arg(long, value_name = "TOKEN", env = "MERIDIAN_TOKEN")]
         token: Option<String>,
     },
@@ -1248,8 +1248,8 @@ enum NamespaceCommand {
         #[arg(long, default_value = DEFAULT_SERVER, value_name = "URL")]
         server: String,
 
-        /// Bearer token (from --token or the MERIDIAN_TOKEN env var; required
-        /// when the server runs auth.mode = "oidc").
+        /// Bearer token (from `--token` or the `MERIDIAN_TOKEN` env var;
+        /// required when the server runs `auth.mode = "oidc"`).
         #[arg(long, value_name = "TOKEN", env = "MERIDIAN_TOKEN")]
         token: Option<String>,
     },
