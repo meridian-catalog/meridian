@@ -327,6 +327,63 @@ fn rest_payload_shapes_parse() {
 }
 
 // ---------------------------------------------------------------------------
+// snapshot-log ordering under rollback (Java engines refuse an unsorted log)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rollback_keeps_snapshot_log_sorted_and_last_updated_consistent() {
+    // main was pointed at snapshot 2 (ts 3_000), so the log has one entry:
+    // [ (2, 3_000) ]. (Snapshot 1 was added but main never pointed at it.)
+    let table = table_with_snapshots();
+    let log = table.snapshot_log.as_ref().expect("snapshot log");
+    assert_eq!(log.len(), 1);
+    assert_eq!((log[0].snapshot_id, log[0].timestamp_ms), (2, 3_000));
+
+    // Roll main back to the OLDER snapshot 1 (ts 2_000). Its own timestamp is
+    // earlier than the last log entry (3_000); a naive append would regress the
+    // log and make the table unreadable by the Iceberg Java reader.
+    let mut builder = table.builder_from();
+    builder
+        .apply(TableUpdate::SetSnapshotRef {
+            ref_name: "main".to_owned(),
+            reference: branch(1),
+        })
+        .expect("rollback");
+    // build with an EARLIER now than the newest snapshot to also exercise the
+    // last-updated-ms clamp.
+    let rolled = builder.build(2_500, None).expect("build rollback");
+
+    let log = rolled.snapshot_log.as_ref().expect("snapshot log");
+    assert_eq!(
+        rolled.current_snapshot_id,
+        Some(1),
+        "main rolled to snapshot 1"
+    );
+    assert_eq!(log.len(), 2, "rollback appends a log entry");
+    assert_eq!(log[1].snapshot_id, 1, "the new entry points at snapshot 1");
+
+    // The whole log is non-decreasing in time (the invariant Java enforces).
+    for pair in log.windows(2) {
+        assert!(
+            pair[1].timestamp_ms >= pair[0].timestamp_ms,
+            "snapshot log must be sorted: {:?} then {:?}",
+            pair[0],
+            pair[1]
+        );
+    }
+    // The clamped entry sits at the previous max (3_000), not the old snapshot's
+    // 2_000 and not the earlier build `now` of 2_500.
+    assert_eq!(log[1].timestamp_ms, 3_000);
+    // last-updated-ms never precedes the newest snapshot-log entry.
+    assert!(
+        rolled.last_updated_ms >= log[1].timestamp_ms,
+        "last-updated-ms {} must not lag the snapshot log {}",
+        rolled.last_updated_ms,
+        log[1].timestamp_ms
+    );
+}
+
+// ---------------------------------------------------------------------------
 // assign-uuid / upgrade-format-version
 // ---------------------------------------------------------------------------
 

@@ -526,9 +526,20 @@ impl MetadataBuilder {
             self.metadata.next_row_id = Some(0);
         }
 
-        // last-updated-ms is monotonic even under clock skew.
+        // last-updated-ms is monotonic even under clock skew, and must not lag
+        // the newest snapshot-log entry: a client whose clock runs ahead can
+        // stamp a snapshot (and thus a snapshot-log entry) later than the
+        // server's `now_ms`, and metadata whose last-updated-ms precedes its
+        // latest snapshot-log timestamp is internally inconsistent. Clamp up to
+        // the last log entry as well.
         let previous_updated_ms = self.metadata.last_updated_ms;
-        self.metadata.last_updated_ms = now_ms.max(previous_updated_ms);
+        let latest_log_ms = self
+            .metadata
+            .snapshot_log
+            .as_ref()
+            .and_then(|log| log.last())
+            .map_or(i64::MIN, |e| e.timestamp_ms);
+        self.metadata.last_updated_ms = now_ms.max(previous_updated_ms).max(latest_log_ms);
 
         if let Some(previous_file) = previous_metadata_location {
             let retention = self.previous_versions_max();
@@ -1110,13 +1121,23 @@ impl MetadataBuilder {
         let snapshot_timestamp_ms = snapshot.timestamp_ms;
         if is_main_branch && self.metadata.current_snapshot_id != Some(snapshot_id) {
             self.metadata.current_snapshot_id = Some(snapshot_id);
-            self.metadata
-                .snapshot_log
-                .get_or_insert_with(Vec::new)
-                .push(SnapshotLogEntry {
-                    snapshot_id,
-                    timestamp_ms: snapshot_timestamp_ms,
-                });
+            let log = self.metadata.snapshot_log.get_or_insert_with(Vec::new);
+            // Keep the snapshot log non-decreasing. A forward commit's snapshot
+            // timestamp is already >= the last entry, so this is a no-op; but a
+            // ROLLBACK (re-pointing main at an OLDER snapshot, e.g. Spark's
+            // `rollback_to_snapshot`) would otherwise append a regressing
+            // timestamp, which the Iceberg Java reader rejects outright
+            // ("[BUG] Expected sorted snapshot log entries") — the table then
+            // fails to load in every JVM engine. Clamp up to the last entry so
+            // the log stays sorted (matching the reference impl, which stamps
+            // rollback entries with the metadata's last-updated time).
+            let ts = log.last().map_or(snapshot_timestamp_ms, |e| {
+                snapshot_timestamp_ms.max(e.timestamp_ms)
+            });
+            log.push(SnapshotLogEntry {
+                snapshot_id,
+                timestamp_ms: ts,
+            });
         }
         self.metadata
             .refs
