@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::stream::{Stream, StreamExt};
-use opendal::layers::RetryLayer;
+use opendal::layers::{RetryLayer, TimeoutLayer};
 use opendal::{Operator, services};
 
 use crate::error::{StorageError, StorageResult, from_opendal};
@@ -108,6 +108,13 @@ impl OpendalStorage {
             .with_min_delay(profile.retry.min_delay)
             .with_max_delay(profile.retry.max_delay)
             .with_jitter();
+        // Bound every object-store operation so a hung connection cannot stall
+        // the caller (on the commit path, the whole request) forever — opendal
+        // ships no default timeout. Applied INNER to the retry layer, so each
+        // attempt is time-bounded and a timeout is then retried.
+        let timeout_layer = TimeoutLayer::new()
+            .with_timeout(profile.retry.timeout)
+            .with_io_timeout(profile.retry.io_timeout);
 
         let op = match &profile.root {
             ProfileRoot::Fs { root } => {
@@ -120,6 +127,7 @@ impl OpendalStorage {
                 let builder = services::Fs::default().root(root_str);
                 Operator::new(builder)
                     .map_err(|err| config_error(&err))?
+                    .layer(timeout_layer)
                     .layer(retry_layer)
                     .finish()
             }
@@ -131,6 +139,7 @@ impl OpendalStorage {
                 let builder = s3_builder(bucket, prefix, options);
                 Operator::new(builder)
                     .map_err(|err| config_error(&err))?
+                    .layer(timeout_layer)
                     .layer(retry_layer)
                     .finish()
             }

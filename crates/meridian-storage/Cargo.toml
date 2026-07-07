@@ -18,6 +18,7 @@ opendal = { version = "0.57", default-features = false, features = [
     "services-fs",
     "services-s3",
     "layers-retry",
+    "layers-timeout",
 ] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

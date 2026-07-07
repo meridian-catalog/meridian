@@ -34,6 +34,17 @@ pub struct RetryConfig {
     pub min_delay: Duration,
     /// Upper bound on the delay between attempts.
     pub max_delay: Duration,
+    /// Overall timeout for a single non-streaming object-store operation
+    /// (stat, delete, and the small metadata GET/PUTs the commit path makes).
+    /// Without it, a hung connection to the object store stalls the operation —
+    /// and, on the commit path, the whole request — indefinitely, because
+    /// opendal has no default request timeout. A timed-out attempt errors (and
+    /// is retried by the retry layer that wraps this one).
+    pub timeout: Duration,
+    /// Per-chunk timeout for streaming reads/writes (large data transfers).
+    /// Larger than `timeout` because a big object legitimately streams for a
+    /// while; this bounds the gap *between* chunks, catching a stalled stream.
+    pub io_timeout: Duration,
 }
 
 impl Default for RetryConfig {
@@ -42,6 +53,8 @@ impl Default for RetryConfig {
             max_retries: 3,
             min_delay: Duration::from_millis(100),
             max_delay: Duration::from_secs(10),
+            timeout: Duration::from_secs(30),
+            io_timeout: Duration::from_secs(60),
         }
     }
 }
@@ -136,6 +149,8 @@ pub(crate) enum ProfileRoot {
 /// | `retry.max-retries` | all | Max retries after the initial attempt (default 3) |
 /// | `retry.min-delay-ms` | all | First backoff delay (default 100) |
 /// | `retry.max-delay-ms` | all | Backoff ceiling (default 10000) |
+/// | `retry.timeout-ms` | all | Per-op timeout for non-streaming calls (default 30000) |
+/// | `retry.io-timeout-ms` | all | Per-chunk timeout for streaming IO (default 60000) |
 ///
 /// Unknown keys are rejected — a typo in a durability-critical option must
 /// fail loudly, not be silently ignored. The exception is the catalog-layer
@@ -297,6 +312,8 @@ const COMMON_OPTION_KEYS: &[&str] = &[
     "retry.max-retries",
     "retry.min-delay-ms",
     "retry.max-delay-ms",
+    "retry.timeout-ms",
+    "retry.io-timeout-ms",
 ];
 
 /// Keys owned by the catalog layer (credential vending, external endpoint
@@ -357,6 +374,12 @@ fn parse_retry_options(options: &BTreeMap<String, String>) -> StorageResult<Retr
     }
     if let Some(v) = options.get("retry.max-delay-ms") {
         retry.max_delay = Duration::from_millis(parse_number(v, "retry.max-delay-ms")?);
+    }
+    if let Some(v) = options.get("retry.timeout-ms") {
+        retry.timeout = Duration::from_millis(parse_number(v, "retry.timeout-ms")?);
+    }
+    if let Some(v) = options.get("retry.io-timeout-ms") {
+        retry.io_timeout = Duration::from_millis(parse_number(v, "retry.io-timeout-ms")?);
     }
     if retry.min_delay > retry.max_delay {
         return Err(StorageError::Config(format!(
@@ -490,6 +513,8 @@ mod tests {
                 ("retry.max-retries", "5"),
                 ("retry.min-delay-ms", "10"),
                 ("retry.max-delay-ms", "500"),
+                ("retry.timeout-ms", "5000"),
+                ("retry.io-timeout-ms", "20000"),
             ]),
         )
         .expect("parse");
@@ -502,6 +527,16 @@ mod tests {
         assert_eq!(p.retry().max_retries, 5);
         assert_eq!(p.retry().min_delay, Duration::from_millis(10));
         assert_eq!(p.retry().max_delay, Duration::from_millis(500));
+        assert_eq!(p.retry().timeout, Duration::from_secs(5));
+        assert_eq!(p.retry().io_timeout, Duration::from_secs(20));
+    }
+
+    #[test]
+    fn retry_timeouts_default_when_unset() {
+        let p = StorageProfile::parse("s3://b/p", &opts(&[])).expect("parse");
+        // A production default must bound every op even with no explicit config.
+        assert_eq!(p.retry().timeout, Duration::from_secs(30));
+        assert_eq!(p.retry().io_timeout, Duration::from_secs(60));
     }
 
     #[test]
