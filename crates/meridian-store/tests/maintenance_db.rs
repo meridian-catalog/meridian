@@ -364,6 +364,54 @@ async fn job_lifecycle_queue_claim_complete() {
 }
 
 #[tokio::test]
+async fn claim_skips_jobs_delayed_by_run_after() {
+    let Some(fx) = fixture().await else { return };
+    let _lock = queue_test_lock().await;
+    reset_queue(&fx.pool).await;
+
+    let job = maintenance::enqueue_job(
+        &fx.pool,
+        fx.workspace,
+        &fx.table_id,
+        JobType::Compaction,
+        None,
+        &json!({"dry_run": false}),
+        "test:maint",
+    )
+    .await
+    .expect("enqueue");
+
+    // Simulate a re-queue with a backoff: run_after set into the future. The
+    // claim must skip it, so the worker backs off instead of hot-looping.
+    sqlx::query("UPDATE maintenance_jobs SET run_after = now() + interval '1 hour' WHERE id = $1")
+        .bind(&job.id)
+        .execute(&fx.pool)
+        .await
+        .expect("delay the job");
+    let none = maintenance::claim_next(&fx.pool, "worker-1")
+        .await
+        .expect("claim");
+    assert!(
+        none.is_none(),
+        "a job whose run_after is in the future must not be claimed"
+    );
+
+    // Once run_after passes, it is claimable again.
+    sqlx::query(
+        "UPDATE maintenance_jobs SET run_after = now() - interval '1 second' WHERE id = $1",
+    )
+    .bind(&job.id)
+    .execute(&fx.pool)
+    .await
+    .expect("un-delay the job");
+    let claimed = maintenance::claim_next(&fx.pool, "worker-1")
+        .await
+        .expect("claim")
+        .expect("the delayed job is now due");
+    assert_eq!(claimed.id, job.id);
+}
+
+#[tokio::test]
 async fn expired_lease_reclaims_running_jobs_then_fails_when_budget_spent() {
     let Some(fx) = fixture().await else { return };
     let _lock = queue_test_lock().await;
@@ -429,7 +477,10 @@ async fn expired_lease_reclaims_running_jobs_then_fails_when_budget_spent() {
         .await
         .expect("reclaim");
     assert_eq!(failed.len(), 1);
-    assert_eq!(failed[0].state, "failed", "budget spent -> failed, not requeued");
+    assert_eq!(
+        failed[0].state, "failed",
+        "budget spent -> failed, not requeued"
+    );
     // No longer claimable.
     let empty = maintenance::claim_next(&fx.pool, "worker-3")
         .await

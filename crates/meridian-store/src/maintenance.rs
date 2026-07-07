@@ -748,6 +748,7 @@ pub async fn claim_next(pool: &PgPool, worker: &str) -> Result<Option<JobRecord>
                         AS last_served
              FROM maintenance_jobs j
              WHERE j.state = 'queued'
+               AND (j.run_after IS NULL OR j.run_after <= now())
              ORDER BY last_served ASC NULLS FIRST, j.created_at ASC
              LIMIT 1
              FOR UPDATE SKIP LOCKED

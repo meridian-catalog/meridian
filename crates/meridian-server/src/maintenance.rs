@@ -141,7 +141,7 @@ pub async fn claim_and_run(
         Ok(JobOutcome::Requeued { reason }) => {
             // The table is busy: yield to the writer (spec C-F4). Reset the job
             // to `queued` so a later pass retries; do not count it as a failure.
-            requeue_job(pool, &job.id, &reason).await?;
+            requeue_job(pool, &job.id, &reason, config.requeue_backoff_secs).await?;
         }
         Err(error) => {
             let payload = json!({ "error": error.to_string() });
@@ -149,7 +149,13 @@ pub async fn claim_and_run(
             // If the job has retries left, re-queue for a fresh attempt;
             // otherwise mark it failed. `attempts` was bumped at claim time.
             if job.attempts < config.max_job_attempts {
-                requeue_job(pool, &job.id, &format!("retry after error: {error}")).await?;
+                requeue_job(
+                    pool,
+                    &job.id,
+                    &format!("retry after error: {error}"),
+                    config.requeue_backoff_secs,
+                )
+                .await?;
             } else if let Err(fail_error) =
                 maintenance::fail_job(pool, &job.id, worker, &payload).await
             {
@@ -180,16 +186,22 @@ async fn requeue_job(
     pool: &PgPool,
     job_id: &str,
     reason: &str,
+    backoff_secs: i64,
 ) -> Result<(), meridian_common::MeridianError> {
     // A direct update (not an audited transition): re-queue is an internal
     // scheduling decision, not a terminal outcome. The claim/complete/fail
-    // transitions remain the audited lifecycle events.
+    // transitions remain the audited lifecycle events. `run_after` delays the
+    // next claim by the backoff so a perpetually-busy table cannot spin the
+    // worker (claim -> yield -> requeue -> claim) with no progress.
     let updated = sqlx::query(
         "UPDATE maintenance_jobs
-         SET state = 'queued', claimed_by = NULL, started_at = NULL, updated_at = now()
+         SET state = 'queued', claimed_by = NULL, started_at = NULL,
+             run_after = now() + make_interval(secs => $2::double precision),
+             updated_at = now()
          WHERE id = $1 AND state = 'running'",
     )
     .bind(job_id)
+    .bind(backoff_secs)
     .execute(pool)
     .await
     .map_err(|e| {

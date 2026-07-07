@@ -248,6 +248,14 @@ pub struct MaintenanceConfig {
     /// metadata-only (drops old snapshots via `remove-snapshots`), but it is
     /// destructive of history, so it has its own switch, default on.
     pub expiry_enabled: bool,
+    /// Backoff in seconds applied when a maintenance job is re-queued (it
+    /// yielded to a concurrent writer commit, or errored with retries left).
+    /// The job's `run_after` is set this far ahead so it is not re-claimed
+    /// immediately: without it, a perpetually-busy table spins the worker
+    /// (claim, yield, re-queue, claim, …) and starves other jobs. Should be
+    /// short enough to retry promptly once the table quiets, long enough to
+    /// break the tight loop.
+    pub requeue_backoff_secs: i64,
     /// Lease deadline in seconds for a claimed (`running`) maintenance job. A
     /// worker that crashes or is `SIGKILL`ed mid-job leaves it `running` with
     /// no one to finish it, which permanently blocks that table's future
@@ -275,6 +283,7 @@ impl Default for MaintenanceConfig {
             reconcile_snapshot_slack: 0,
             expiry_min_snapshots_kept: 1,
             expiry_enabled: true,
+            requeue_backoff_secs: 60,
             job_lease_secs: 1_800,
         }
     }
