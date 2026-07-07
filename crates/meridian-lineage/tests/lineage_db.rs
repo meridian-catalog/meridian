@@ -333,6 +333,16 @@ async fn impact_returns_correct_downstream_set() {
     for id in [&raw, &stg, &mart, &dash, &audit] {
         assert!(reached.contains(id), "graph reaches {id}");
     }
+    // The batched ident resolution populates a display ident for every node
+    // (regression guard for the search/lineage N+1 batching).
+    for node in &graph.nodes {
+        assert!(
+            node.ident.as_deref().is_some_and(|s| s.contains('.')),
+            "node {} must have a batched display ident, got {:?}",
+            node.table_id,
+            node.ident
+        );
+    }
 
     // Impact of dropping raw: the downstream blast radius is stg, mart, dash,
     // audit, with owners analytics + bi collected for notification.

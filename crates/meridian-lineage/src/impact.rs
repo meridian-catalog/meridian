@@ -140,10 +140,13 @@ pub async fn lineage_graph(
         }
     }
 
-    // Resolve display idents for the native nodes.
+    // Resolve display idents for all native nodes in one batched lookup (was an
+    // ident query per node — the graph N+1).
+    let node_ids: Vec<String> = depth_of.keys().cloned().collect();
+    let idents = table_idents(pool, &node_ids).await?;
     let mut nodes = Vec::with_capacity(depth_of.len());
     for (table_id, node_depth) in depth_of {
-        let ident = table_ident(pool, &table_id).await?;
+        let ident = idents.get(&table_id).cloned();
         nodes.push(GraphNode {
             table_id,
             ident,
@@ -443,8 +446,49 @@ fn render_change(change: &Change) -> String {
 }
 
 /// Loads a table's display ident (`warehouse.ns.table`) if it still exists.
-async fn table_ident(pool: &PgPool, table_id: &str) -> Result<Option<String>> {
-    Ok(table_ident_and_owner(pool, table_id).await?.0)
+/// Batched display-ident lookup: resolves the ident (`warehouse.ns.table`)
+/// for many tables in ONE query. The lineage graph resolved an ident per node
+/// (an N+1 over the visited set); this collapses that to a single lookup.
+/// Returns a map from table id to ident; a table with no row is absent (the
+/// caller renders its ident as `None`).
+async fn table_idents(
+    pool: &PgPool,
+    table_ids: &[String],
+) -> Result<std::collections::HashMap<String, String>> {
+    #[derive(sqlx::FromRow)]
+    struct IdRow {
+        id: String,
+        warehouse_name: String,
+        levels: Vec<String>,
+        name: String,
+    }
+    if table_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let rows: Vec<IdRow> = sqlx::query_as(
+        "SELECT t.id AS id, w.name AS warehouse_name, n.levels AS levels, t.name AS name
+         FROM tables t
+         JOIN namespaces n ON n.id = t.namespace_id
+         JOIN warehouses w ON w.id = n.warehouse_id
+         WHERE t.id = ANY($1)",
+    )
+    .bind(table_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| meridian_store::map_sqlx_error("failed to batch table idents", e))?;
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let mut ident = r.warehouse_name;
+            for level in &r.levels {
+                ident.push('.');
+                ident.push_str(level);
+            }
+            ident.push('.');
+            ident.push_str(&r.name);
+            (r.id, ident)
+        })
+        .collect())
 }
 
 /// One `tables` row's display identity + owner, joined to its namespace and
