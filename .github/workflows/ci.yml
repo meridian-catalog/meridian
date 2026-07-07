@@ -100,3 +100,9 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # Bound compiler parallelism inside the build: buildx runs in a
+          # container where the host swap added above is not a reliable
+          # backstop, and the kernel OOM-killer intermittently kills rustc
+          # on the Arrow/Parquet release compile. Two jobs fit the runner.
+          build-args: |
+            BUILD_JOBS=2

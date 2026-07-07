@@ -16,7 +16,12 @@ COPY crates ./crates
 # present even when building only meridian-cli.
 COPY testing/bench ./testing/bench
 
-RUN cargo build --release --locked -p meridian-cli
+# BUILD_JOBS caps cargo/rustc parallelism. CI runners (7 GB) OOM-kill the
+# compiler on the Arrow/Parquet release build at full parallelism; two jobs
+# bound peak memory and fit comfortably. Empty (the default) = cargo's default,
+# so local builds on big machines stay fast.
+ARG BUILD_JOBS=
+RUN cargo build --release --locked -p meridian-cli ${BUILD_JOBS:+-j "$BUILD_JOBS"}
 
 # ---------------------------------------------------------------------------
 # Runtime stage
