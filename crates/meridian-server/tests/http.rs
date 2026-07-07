@@ -90,6 +90,47 @@ async fn readyz_reports_ok_with_reachable_database() {
 }
 
 #[tokio::test]
+async fn healthz_is_live_but_readyz_is_unready_when_db_is_down() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("skipping: DATABASE_URL is not set");
+        return;
+    };
+    let mut config = AppConfig::default();
+    config.database.url = url;
+    let pool = meridian_store::connect(&config.database)
+        .await
+        .expect("connect");
+    let router = build_router(AppState {
+        pool: pool.clone(),
+        config: Arc::new(config),
+    });
+    // Simulate a database outage by closing the pool out from under the router.
+    pool.close().await;
+
+    // Liveness stays UP: killing/restarting the pod would not fix a DB outage,
+    // so /healthz must not fail (or every replica crashloops during a blip).
+    let (live_status, live_body) = get_json(router.clone(), "/healthz").await;
+    assert_eq!(
+        live_status,
+        StatusCode::OK,
+        "liveness must stay 200 during a database outage"
+    );
+    assert_eq!(live_body["status"], "ok");
+    assert_eq!(
+        live_body["checks"]["database"], "error",
+        "but the body still surfaces the DB problem"
+    );
+
+    // Readiness sheds traffic: /readyz goes 503 so the LB removes the replica.
+    let (ready_status, _) = get_json(router, "/readyz").await;
+    assert_eq!(
+        ready_status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "readiness must go 503 so the orchestrator stops routing to it"
+    );
+}
+
+#[tokio::test]
 async fn iceberg_config_returns_spec_shape_on_both_paths() {
     let Some(router) = test_router().await else {
         return;

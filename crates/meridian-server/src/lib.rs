@@ -844,6 +844,10 @@ fn cors_layer(origins: &[String]) -> CorsLayer {
             Method::GET,
             Method::POST,
             Method::PUT,
+            // PATCH is used by the console (e.g. enabling/disabling a quality
+            // monitor); without it the browser preflight is rejected and the
+            // action silently fails.
+            Method::PATCH,
             Method::DELETE,
             Method::HEAD,
             Method::OPTIONS,

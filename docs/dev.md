@@ -21,6 +21,11 @@ startup). Then:
 ```sh
 curl -s localhost:8181/healthz
 # {"status":"ok","checks":{"database":"ok"}}
+# /healthz is a LIVENESS probe: 200 while the process is serving (it reports
+# database reachability in the body but never fails on it). /readyz is the
+# READINESS probe: 503 when Postgres is unreachable, so an orchestrator sheds
+# traffic without restarting the pod. Wire liveness -> /healthz, readiness ->
+# /readyz.
 
 curl -s localhost:8181/v1/config
 # {"defaults":{},"overrides":{},"endpoints":[...],"idempotency-key-lifetime":"PT24H"}

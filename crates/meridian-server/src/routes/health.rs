@@ -49,17 +49,35 @@ async fn database_health(state: &AppState) -> (StatusCode, Json<HealthResponse>)
     }
 }
 
-/// `GET /healthz` — process is up and its database is reachable.
+/// `GET /healthz` — **liveness**: the process is up and serving requests.
+///
+/// Always `200` while the server can answer. It reports database reachability
+/// in the body (so the happy path is `{"status":"ok","checks":{"database":"ok"}}`
+/// and a human can still see a DB problem), but it deliberately does **not**
+/// gate the status code on the database: a Postgres outage is not fixed by an
+/// orchestrator killing and restarting the pod — that just crashloops every
+/// replica during a database blip. Shedding traffic during a dependency outage
+/// is **readiness's** job (`/readyz`), not liveness's.
 pub async fn healthz(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse>) {
-    database_health(&state).await
+    let database = if meridian_store::health_check(&state.pool).await.is_ok() {
+        "ok"
+    } else {
+        "error"
+    };
+    (
+        StatusCode::OK,
+        Json(HealthResponse {
+            status: "ok".to_owned(),
+            checks: HealthChecks {
+                database: database.to_owned(),
+            },
+        }),
+    )
 }
 
-/// `GET /readyz` — ready to accept traffic.
-///
-/// Currently identical to `/healthz` (the only readiness dependency is
-/// Postgres). Kept as a separate endpoint so orchestrators can wire distinct
-/// probes now and we can tighten readiness semantics later without breaking
-/// deployments.
+/// `GET /readyz` — **readiness**: ready to accept traffic. Returns `503` when
+/// Postgres is unreachable so the orchestrator removes this replica from the
+/// load balancer until the dependency recovers (without restarting it).
 pub async fn readyz(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse>) {
     database_health(&state).await
 }

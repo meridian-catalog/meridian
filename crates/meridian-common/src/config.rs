@@ -534,18 +534,39 @@ pub struct DatabaseConfig {
     /// Also settable via the conventional `DATABASE_URL` environment
     /// variable.
     pub url: String,
-    /// Maximum number of pooled connections.
+    /// Maximum number of pooled connections. This pool is shared by every API
+    /// request handler **and** the background workers (outbox relay, webhook
+    /// dispatcher, maintenance worker + reconciler, federation and lineage
+    /// loops, plan sweeper), several of which hold a connection continuously.
+    /// Size it above `(peak concurrent requests) + (worker count)`; the default
+    /// leaves headroom for the workers plus a modest request concurrency. Stays
+    /// well under Postgres's own `max_connections` (default 100).
     pub max_connections: u32,
-    /// Timeout in seconds when acquiring a connection from the pool.
+    /// Minimum warm connections kept open, so a burst after idle does not pay
+    /// connection-establishment latency on the first requests.
+    pub min_connections: u32,
+    /// Timeout in seconds when acquiring a connection from the pool. On
+    /// exhaustion a handler fails fast with this bound rather than hanging.
     pub acquire_timeout_secs: u64,
+    /// Recycle a connection after it has been idle this long (seconds), so the
+    /// pool releases capacity back to Postgres during quiet periods.
+    pub idle_timeout_secs: u64,
+    /// Hard cap on a connection's lifetime (seconds) regardless of use. Bounds
+    /// staleness and lets the pool recover cleanly after a Postgres failover or
+    /// a rolling restart of the database (old connections are retired rather
+    /// than erroring mid-query indefinitely).
+    pub max_lifetime_secs: u64,
 }
 
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
             url: String::new(),
-            max_connections: 10,
+            max_connections: 20,
+            min_connections: 2,
             acquire_timeout_secs: 5,
+            idle_timeout_secs: 600,
+            max_lifetime_secs: 1_800,
         }
     }
 }
